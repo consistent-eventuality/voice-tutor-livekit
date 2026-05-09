@@ -10,14 +10,6 @@ type View =
 export function App() {
   const userId = useUserId()
   const [view, setView] = useState<View>({ kind: 'home' })
-  // Bump on each disconnect so Home knows to poll for the just-ended lesson
-  // landing in the DB (agent's shutdown POST happens 1-3s after disconnect)
-  const [pollKey, setPollKey] = useState(0)
-
-  function endSession() {
-    setView({ kind: 'home' })
-    setPollKey((k) => k + 1)
-  }
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-center p-6">
@@ -32,7 +24,6 @@ export function App() {
         {view.kind === 'home' ? (
           <Home
             userId={userId}
-            pollKey={pollKey}
             onStartNew={() => setView({ kind: 'session', lessonId: null })}
             onResume={(lessonId) => setView({ kind: 'session', lessonId })}
           />
@@ -40,7 +31,7 @@ export function App() {
           <VoicePanel
             userId={userId}
             lessonId={view.lessonId}
-            onLeave={endSession}
+            onLeave={() => setView({ kind: 'home' })}
           />
         )}
       </div>

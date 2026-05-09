@@ -4,48 +4,31 @@ import { timeAgo } from '../utils/time'
 
 interface HomeProps {
   userId: string
-  pollKey: number  // bumped after a session ends → triggers brief polling
   onStartNew: () => void
   onResume: (lessonId: number) => void
 }
 
-export function Home({ userId, pollKey, onStartNew, onResume }: HomeProps) {
+export function Home({ userId, onStartNew, onResume }: HomeProps) {
   const [lessons, setLessons] = useState<LessonListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-
-    async function fetchOnce() {
-      try {
-        const items = await listLessons(userId)
+    listLessons(userId)
+      .then((items) => {
         if (!cancelled) setLessons(items)
-      } catch (e) {
+      })
+      .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-      } finally {
+      })
+      .finally(() => {
         if (!cancelled) setLoading(false)
-      }
-    }
-
-    fetchOnce()
-
-    // Poll briefly after each disconnect to catch the agent's /sessions/end
-    // POST landing in the DB. Skipped on the very first mount (pollKey === 0).
-    if (pollKey === 0) {
-      return () => {
-        cancelled = true
-      }
-    }
-
-    const interval = setInterval(fetchOnce, 1000)
-    const stop = setTimeout(() => clearInterval(interval), 6000)
+      })
     return () => {
       cancelled = true
-      clearInterval(interval)
-      clearTimeout(stop)
     }
-  }, [userId, pollKey])
+  }, [userId])
 
   return (
     <div className="rounded-xl bg-[color:var(--color-surface)] p-8">
