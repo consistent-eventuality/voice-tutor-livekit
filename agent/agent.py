@@ -21,6 +21,7 @@ Optional env: API_BASE_URL (default http://api:8000)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -140,6 +141,21 @@ async def entrypoint(ctx: JobContext) -> None:
         content = (content or "").strip()
         if content:
             collected.append({"role": role, "content": content})
+
+    # End the job immediately when the user disconnects. Without this, the
+    # agent waits for LiveKit's empty_timeout (default ~20s) before its
+    # shutdown callback fires, which delays the lesson appearing in the
+    # past-lessons list.
+    shutdown_started = False
+
+    @ctx.room.on("participant_disconnected")
+    def _on_user_left(participant) -> None:  # type: ignore[no-untyped-def]
+        nonlocal shutdown_started
+        if shutdown_started:
+            return
+        shutdown_started = True
+        logger.info("Participant %s left — closing session", participant.identity)
+        asyncio.create_task(session.aclose())
 
     async def _on_shutdown() -> None:
         await _post_session_end(ctx.room.name, collected)
