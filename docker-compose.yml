@@ -1,12 +1,22 @@
+# Env precedence (highest wins):
+#   1. Shell env vars (e.g. exported in ~/.zprofile) — preferred for personal dev
+#   2. .env file in this directory (auto-loaded by compose for ${VAR} substitution)
+#   3. Empty default (will cause runtime failure with a clear error)
+#
+# So `.env` is optional: if your shell already exports LIVEKIT_*/OPENAI_API_KEY,
+# compose picks them up. Reviewers without those vars set should `cp .env.example .env`.
+
 services:
   api:
     build: ./backend
     container_name: voice-tutor-api
     ports:
       - "8000:8000"
-    env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
+      - LIVEKIT_URL=${LIVEKIT_URL:-}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-}
     volumes:
       - ./backend:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -14,9 +24,13 @@ services:
   agent:
     build: ./agent
     container_name: voice-tutor-agent
-    env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
+      - LIVEKIT_URL=${LIVEKIT_URL:-}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_REALTIME_MODEL=${OPENAI_REALTIME_MODEL:-gpt-4o-realtime-preview}
     volumes:
       - ./agent:/app
     command: python agent.py dev
@@ -28,9 +42,9 @@ services:
     container_name: voice-tutor-frontend
     ports:
       - "5173:5173"
-    env_file: .env
     environment:
       - VITE_API_PROXY_TARGET=http://api:8000
+      - VITE_API_URL=${VITE_API_URL:-}
     volumes:
       - ./frontend:/app
       - /app/node_modules

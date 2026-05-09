@@ -9,8 +9,6 @@ asks the user what they'd like to learn and teaches whatever they pick. See
 
 ## Quickstart
 
-Two commands:
-
 ```bash
 cp .env.example .env   # then fill in 4 keys (see below)
 docker compose up --build
@@ -18,6 +16,11 @@ docker compose up --build
 
 Then open <http://localhost:5173>, click **Start session**, allow microphone
 access, and start talking.
+
+> **Env precedence.** Compose reads variables from your shell first, falling
+> back to the `.env` file. If you already export `LIVEKIT_*` and
+> `OPENAI_API_KEY` in your shell profile (`~/.zprofile` etc.), you don't need
+> to populate `.env` at all.
 
 ### Required keys
 
@@ -151,6 +154,15 @@ sessions on that pod, not the whole fleet.
 ├── .env.example
 └── README.md
 ```
+
+## TODO before submission
+
+- [ ] **Spin up a dedicated LiveKit Cloud project for this take-home.**
+  During development this scaffold reuses an existing personal LiveKit project,
+  which means tutor sessions count against that project's quota. Before
+  submitting, create a fresh project at <https://cloud.livekit.io>, generate
+  new API key + secret, and update `LIVEKIT_URL` / `LIVEKIT_API_KEY` /
+  `LIVEKIT_API_SECRET`.
 
 ## Parked decisions
 
