@@ -38,6 +38,8 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8000")
 
 TUTOR_INSTRUCTIONS = (
     "You are a friendly, patient voice tutor. "
+    "Always respond in English unless the user explicitly asks you to switch "
+    "languages. "
     "Greet the user warmly and ask what they'd like to learn about today. "
     "Once they pick a topic, teach in short, conversational turns: explain a "
     "concept in 2-3 sentences, then ask a check-in question to make sure they "
