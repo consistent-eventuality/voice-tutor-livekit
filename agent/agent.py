@@ -21,7 +21,6 @@ Optional env: API_BASE_URL (default http://api:8000)
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 
@@ -144,14 +143,19 @@ async def entrypoint(ctx: JobContext) -> None:
             collected.append({"role": role, "content": content})
 
     # Distinguish explicit disconnects from network drops:
-    #   CLIENT_INITIATED  → user clicked Disconnect or closed the tab. Tear
-    #                       down right away so the lesson lands in the list.
+    #   CLIENT_INITIATED  → user clicked Disconnect or closed the tab. End
+    #                       the JobContext via ctx.shutdown() so the
+    #                       shutdown callback (which posts /sessions/end)
+    #                       fires immediately. Without this, livekit-agents'
+    #                       built-in close_on_disconnect closes the session
+    #                       but the JobContext sits in the room until
+    #                       empty_timeout (~20s on Cloud default) before
+    #                       firing shutdown callbacks — that was the lag.
     #   anything else     → likely a network drop. Don't act — let LiveKit's
-    #                       empty_timeout (~20s on Cloud default) tick down
-    #                       so the user has a chance to reconnect from the
-    #                       same tab. If they don't return, the worker tears
-    #                       down naturally and the shutdown callback still
-    #                       fires.
+    #                       empty_timeout tick down so the user has a chance
+    #                       to reconnect from the same tab. If they don't,
+    #                       the worker tears down naturally and the shutdown
+    #                       callback still fires (just slower).
     shutdown_started = False
 
     @ctx.room.on("participant_disconnected")
@@ -169,10 +173,10 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         shutdown_started = True
         logger.info(
-            "Participant %s explicitly disconnected — closing session now",
+            "Participant %s explicitly disconnected — shutting down job",
             participant.identity,
         )
-        asyncio.create_task(session.aclose())
+        ctx.shutdown(reason="user_disconnected")
 
     async def _on_shutdown() -> None:
         await _post_session_end(ctx.room.name, collected)
