@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   BarVisualizer,
   LiveKitRoom,
@@ -8,44 +8,48 @@ import {
 } from '@livekit/components-react'
 import { fetchToken, type TokenPayload } from '../api'
 
-export function VoicePanel() {
+interface VoicePanelProps {
+  userId: string
+  lessonId: number | null      // null = start a new lesson
+  onLeave: () => void
+}
+
+export function VoicePanel({ userId, lessonId, onLeave }: VoicePanelProps) {
   const [payload, setPayload] = useState<TokenPayload | null>(null)
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function start() {
-    setLoading(true)
-    setError(null)
-    try {
-      const token = await fetchToken()
-      setPayload(token)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setLoading(false)
+  useEffect(() => {
+    let cancelled = false
+    fetchToken({ userId, lessonId })
+      .then((p) => {
+        if (!cancelled) setPayload(p)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+      })
+    return () => {
+      cancelled = true
     }
-  }
+  }, [userId, lessonId])
 
-  function disconnect() {
-    setPayload(null)
+  if (error) {
+    return (
+      <div className="rounded-xl bg-[color:var(--color-surface)] p-8 text-center">
+        <p className="text-sm text-red-400 break-words">{error}</p>
+        <button
+          onClick={onLeave}
+          className="mt-4 text-xs text-[color:var(--color-muted)] hover:text-white"
+        >
+          Back
+        </button>
+      </div>
+    )
   }
 
   if (!payload) {
     return (
       <div className="rounded-xl bg-[color:var(--color-surface)] p-8 text-center">
-        <button
-          onClick={start}
-          disabled={loading}
-          className="px-6 py-3 rounded-lg bg-[color:var(--color-accent)] text-white font-medium disabled:opacity-50"
-        >
-          {loading ? 'Connecting…' : 'Start session'}
-        </button>
-        {error && (
-          <p className="mt-4 text-sm text-red-400 break-words">{error}</p>
-        )}
-        <p className="mt-6 text-xs text-[color:var(--color-muted)]">
-          You'll be asked for microphone permission.
-        </p>
+        <p className="text-sm text-[color:var(--color-muted)]">Connecting…</p>
       </div>
     )
   }
@@ -57,20 +61,25 @@ export function VoicePanel() {
       connect
       audio
       video={false}
-      onDisconnected={disconnect}
+      onDisconnected={onLeave}
       className="rounded-xl bg-[color:var(--color-surface)] p-6"
     >
       <RoomAudioRenderer />
-      <ActiveSession />
+      <ActiveSession resuming={payload.resuming} />
     </LiveKitRoom>
   )
 }
 
-function ActiveSession() {
+function ActiveSession({ resuming }: { resuming: boolean }) {
   const { state, audioTrack } = useVoiceAssistant()
 
   return (
     <div className="flex flex-col items-center gap-6">
+      {resuming && (
+        <p className="text-xs text-[color:var(--color-muted)]">
+          Resuming previous lesson…
+        </p>
+      )}
       <div className="h-32 w-full flex items-center justify-center">
         <BarVisualizer
           state={state}

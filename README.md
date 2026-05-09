@@ -70,18 +70,49 @@ curl -X POST http://localhost:8000/token -H 'content-type: application/json' -d 
 
 Three services, each with one job:
 
-- **`backend/`** (FastAPI) mints LiveKit access tokens. Stateless. Never
-  touches audio.
+- **`backend/`** (FastAPI + SQLite) mints LiveKit access tokens, persists
+  lessons, and serves the agent's "what's the prior context for this room?"
+  query. Stateless except for the SQLite file under `data/`.
 - **`agent/`** (livekit-agents worker) is a long-lived process that registers
   with LiveKit Cloud. When a user joins a room, the dispatcher assigns this
   worker; it joins the room as a participant, runs the voice loop, and leaves
-  when the user does.
-- **`frontend/`** (Vite + React) is the UI: token fetch, `<LiveKitRoom>`,
-  visualizer, and a single Start/Stop button.
+  when the user does. On dispatch it fetches prior-lesson context from the
+  backend; on shutdown it posts the new transcript back.
+- **`frontend/`** (Vite + React) is the UI: home view with past-lessons list,
+  voice panel with `<LiveKitRoom>`, visualizer, and the LiveKit control bar.
 
 Token minting and voice/AI logic live in different processes so they scale
 independently — one is HTTP request/response, the other is long-lived WebRTC
 sessions.
+
+## Resumable lessons
+
+The data model has two tables:
+
+- **`lessons`** — the persistent learning thread. One row per topic the user
+  has explored. Has a `topic` derived from the first user utterance.
+- **`sessions`** — one row per LiveKit room joined. Children of a lesson.
+  Holds the JSON transcript for that specific connection.
+
+When the user clicks **Resume** on a past lesson, the API attaches a new
+`sessions` row to that existing lesson. On dispatch, the agent calls
+`GET /sessions/by-room/{room}` and the API returns the concatenated
+transcript across all prior sessions of that lesson. The agent seeds its
+instructions with that history and continues.
+
+User identity is an anonymous UUID generated client-side and stored in
+`localStorage` — no auth required, but persistent enough for "come back
+tomorrow."
+
+### Endpoints at a glance
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Smoke test |
+| `POST` | `/token` | Mint LiveKit JWT, create lesson + session rows. Pass `lesson_id` to resume. |
+| `GET` | `/lessons?user_id=...` | List the user's lessons (most recent activity first). |
+| `GET` | `/sessions/by-room/{room_name}` | Agent fetches this on dispatch — returns concatenated prior-lesson transcript. |
+| `POST` | `/sessions/end` | Agent posts here on shutdown with the new transcript. Discards empty sessions. |
 
 ## Design decisions
 
@@ -100,9 +131,9 @@ in FastAPI via background tasks, but that would couple HTTP concurrency
 LiveKit dispatcher's worker-pool semantics. Two clean services is the
 canonical pattern.
 
-**No database.** The scaffold is stateless — sessions don't persist. Adding
-SQLite for transcript history is a ~30-minute extension (see
-[Parked decisions](#parked-decisions)).
+**SQLite for lesson persistence.** A single file at `data/voice_tutor.db`,
+two tables (`lessons`, `sessions`), no migrations framework. Sufficient for
+single-instance deployment — the migration to Postgres is one URL change.
 
 **No auth.** Reviewers shouldn't have to sign up to talk to the tutor. If
 multi-user persistence becomes a goal, drop in a JWT middleware on the
@@ -138,18 +169,24 @@ sessions on that pod, not the whole fleet.
 
 ```
 .
-├── backend/          # FastAPI: /health, /token
+├── backend/          # FastAPI + SQLite
 │   ├── app/
-│   │   ├── main.py
+│   │   ├── main.py            # endpoints: /health, /token, /lessons, /sessions/...
+│   │   ├── db.py              # SQLAlchemy: Lesson + TutorSession models
 │   │   └── livekit_token.py
-│   └── tests/
+│   └── tests/test_health.py   # 6 tests covering token + lesson resume flow
 ├── agent/            # livekit-agents worker (long-lived)
 │   └── agent.py
 ├── frontend/         # Vite + React + TS + Tailwind v4
 │   └── src/
 │       ├── App.tsx
 │       ├── api.ts
-│       └── components/VoicePanel.tsx
+│       ├── hooks/useUserId.ts
+│       ├── utils/time.ts
+│       └── components/
+│           ├── Home.tsx       # past-lessons list + Start new
+│           └── VoicePanel.tsx # in-session voice UI
+├── data/             # SQLite file lives here (gitignored)
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
@@ -172,18 +209,21 @@ is a small, contained extension:
 - **Tutor topic.** The agent currently asks the user what they want to learn.
   Candidate fixed subjects: cocktail mixology, chess openings, music theory,
   obscure history. To pick one, edit `TUTOR_INSTRUCTIONS` in `agent/agent.py`.
-- **Post-session summary** *(bonus)*. After the room closes, a summary task
-  could send the transcript to GPT-4o for "key topics + suggested follow-ups."
-  Requires either capturing transcripts via the agent's STT events or via
-  LiveKit's recording API.
-- **Session resumability** *(bonus)*. Persist transcripts keyed by user id;
-  on reconnect, prepend prior context to the agent's instructions. Needs
-  SQLite + a stable user identifier.
-- **Reconnect / error handling** *(bonus)*. Frontend already retries on
-  user-initiated reconnect; agent-side could wrap the LLM call in a
-  try/except and play a friendly "let me try that again" fallback.
-- **Auth.** No auth in the scaffold. JWT middleware on `/token` would be the
-  drop-in.
+- **Session resumability — implemented.** See [Resumable lessons](#resumable-lessons)
+  above. Past lessons appear on the home screen; clicking one resumes with
+  full prior-conversation context fed to the agent.
+- **Post-session summary** *(deferred)*. Right now the agent receives the full
+  prior transcript on resume. For long lessons (30min+), this dilutes the
+  agent's working context. The fix is a one-shot LLM call at session end that
+  produces a 2-sentence summary stored on the `lessons` row, with the agent
+  receiving "summary of older sessions + verbatim of latest session."
+- **Reconnect / brief disconnect tolerance** *(deferred)*. LiveKit's
+  `empty_timeout` would let the agent stay in the room for ~60s after the
+  user drops, so a refresh or network blip doesn't end the session. One field
+  on the room-create call.
+- **Auth.** No auth in the scaffold; user identity is an anonymous UUID in
+  localStorage. JWT middleware on `/token` would be the drop-in for real
+  multi-user.
 
 ## Gotchas
 
