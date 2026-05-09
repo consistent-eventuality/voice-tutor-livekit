@@ -27,6 +27,7 @@ import os
 
 import httpx
 from dotenv import load_dotenv
+from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
 from livekit.plugins import openai
 
@@ -142,19 +143,35 @@ async def entrypoint(ctx: JobContext) -> None:
         if content:
             collected.append({"role": role, "content": content})
 
-    # End the job immediately when the user disconnects. Without this, the
-    # agent waits for LiveKit's empty_timeout (default ~20s) before its
-    # shutdown callback fires, which delays the lesson appearing in the
-    # past-lessons list.
+    # Distinguish explicit disconnects from network drops:
+    #   CLIENT_INITIATED  → user clicked Disconnect or closed the tab. Tear
+    #                       down right away so the lesson lands in the list.
+    #   anything else     → likely a network drop. Don't act — let LiveKit's
+    #                       empty_timeout (~20s on Cloud default) tick down
+    #                       so the user has a chance to reconnect from the
+    #                       same tab. If they don't return, the worker tears
+    #                       down naturally and the shutdown callback still
+    #                       fires.
     shutdown_started = False
 
     @ctx.room.on("participant_disconnected")
-    def _on_user_left(participant) -> None:  # type: ignore[no-untyped-def]
+    def _on_user_left(participant: rtc.RemoteParticipant) -> None:
         nonlocal shutdown_started
         if shutdown_started:
             return
+        reason = getattr(participant, "disconnect_reason", None)
+        if reason != rtc.DisconnectReason.CLIENT_INITIATED:
+            logger.info(
+                "Participant %s dropped (reason=%s) — waiting for empty_timeout",
+                participant.identity,
+                reason,
+            )
+            return
         shutdown_started = True
-        logger.info("Participant %s left — closing session", participant.identity)
+        logger.info(
+            "Participant %s explicitly disconnected — closing session now",
+            participant.identity,
+        )
         asyncio.create_task(session.aclose())
 
     async def _on_shutdown() -> None:
