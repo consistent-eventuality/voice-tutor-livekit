@@ -61,12 +61,12 @@ export function VoicePanel() {
       className="rounded-xl bg-[color:var(--color-surface)] p-6"
     >
       <RoomAudioRenderer />
-      <ActiveSession onLeave={disconnect} />
+      <ActiveSession />
     </LiveKitRoom>
   )
 }
 
-function ActiveSession({ onLeave }: { onLeave: () => void }) {
+function ActiveSession() {
   const { state, audioTrack } = useVoiceAssistant()
 
   return (
@@ -83,12 +83,6 @@ function ActiveSession({ onLeave }: { onLeave: () => void }) {
         {state}
       </p>
       <VoiceAssistantControlBar />
-      <button
-        onClick={onLeave}
-        className="text-xs text-[color:var(--color-muted)] hover:text-white"
-      >
-        End session
-      </button>
     </div>
   )
 }
