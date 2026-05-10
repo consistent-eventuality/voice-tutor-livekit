@@ -29,14 +29,14 @@ import os
 import httpx
 from dotenv import load_dotenv
 from livekit import rtc
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+from livekit.agents import Agent, AgentSession, JobContext, StopResponse, WorkerOptions, cli
 from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.plugins import openai as lk_openai, silero
 
 import prompts
 from lesson import LESSON
 from grader import Grader
-from state_machine import LessonState
+from state_machine import Grade, LessonState
 
 load_dotenv()
 
@@ -44,6 +44,17 @@ logger = logging.getLogger("voice-tutor-agent")
 logging.basicConfig(level=logging.INFO)
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8000")
+
+# Cheat phrase — say this instead of a real answer to advance the state
+# machine without calling the grader. Designed for fast end-to-end testing
+# (walk a lesson from start to finish without thoughtful answers).
+# Configurable via env if you want something different.
+CHEAT_PHRASE = os.environ.get("VOICE_TUTOR_CHEAT", "abracadabra").strip().lower()
+
+
+def _is_cheat_phrase(user_text: str) -> bool:
+    cleaned = user_text.strip().rstrip(".!?,;:").strip().lower()
+    return cleaned == CHEAT_PHRASE
 
 
 class TutorAgent(Agent):
@@ -64,50 +75,83 @@ class TutorAgent(Agent):
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
     ) -> None:
+        # Every early return below is `raise StopResponse()` — once the
+        # lesson is over (or the input is unusable), we never want the
+        # framework to fall through to its LLM-driven auto-reply.
         if self._state.is_done:
-            return
+            raise StopResponse()
 
         user_text = (new_message.text_content or "").strip()
         if not user_text:
-            return
+            raise StopResponse()
+        logger.info("User said: %r", user_text)
 
         concept = self._state.current_concept
         if concept is None:
-            return
+            raise StopResponse()
 
-        try:
-            grade = await self._grader.grade(concept, user_text)
+        # Cheat-code path: skip the grader, force-pass. Lets the developer
+        # walk through a full lesson quickly during testing/demos without
+        # giving real answers. Logged distinctly so it's obvious in tails.
+        if _is_cheat_phrase(user_text):
             logger.info(
-                "Grade: concept=%s score=%d gaps=%s phase_before=%s",
-                concept.id, grade.score, grade.gaps, self._state.phase,
+                "[CHEAT] phrase=%r — synthetic pass for concept=%s phase_before=%s",
+                CHEAT_PHRASE, concept.id, self._state.phase,
             )
-            self._state.transition(grade)
+            self._state.transition(Grade(score=10, gaps=[]))
             logger.info(
                 "Phase after transition: %s (idx=%d)",
                 self._state.phase, self._state.idx,
             )
-        except Exception as e:
-            logger.exception("Grading failed: %s", e)
-            return
+        else:
+            try:
+                grade = await self._grader.grade(concept, user_text)
+                logger.info(
+                    "Grade: concept=%s score=%d gaps=%s phase_before=%s",
+                    concept.id, grade.score, grade.gaps, self._state.phase,
+                )
+                self._state.transition(grade)
+                logger.info(
+                    "Phase after transition: %s (idx=%d)",
+                    self._state.phase, self._state.idx,
+                )
+            except Exception as e:
+                logger.exception("Grading failed: %s", e)
+                raise StopResponse()
 
         # Dispatch to the next spoken text based on the new phase.
         if self._state.phase == "teach":
             assert self._state.current_concept is not None
             text = prompts.teach_text(self._state.current_concept)
+            # Acknowledge the user before the next concept's teach. idx > 0
+            # means we just advanced from a prior concept (vs. the boot
+            # turn, which is dispatched from entrypoint with idx=0 and
+            # doesn't hit this code path).
+            if self._state.idx > 0:
+                text = "Great job! " + text
         elif self._state.phase == "reteach":
             assert self._state.current_concept is not None
+            # Reteach text already has its own lead-in ("Let me walk
+            # through that one more time"), so no extra acknowledgment.
             text = prompts.reteach_text(
                 self._state.current_concept, self._state.last_gaps,
             )
         elif self._state.phase == "done":
-            # User just passed the last concept. Audibly signal the end of
-            # the lesson; the speaking→listening shutdown handler will
-            # tear down the job once the closing line finishes.
+            # User just passed the last concept. The closing line already
+            # starts with "Great work — you've completed the lesson," so
+            # no extra acknowledgment.
             text = prompts.closing_text()
         else:
-            return
+            raise StopResponse()
 
         await self.session.say(text)
+        # Suppress the framework's auto-reply. Without this, after our
+        # session.say() returns the framework calls generate_reply() and
+        # the LLM produces an additional unscripted utterance — the
+        # rambling we observed after the closing line. All agent speech
+        # in this app is curated and routed through session.say(); the
+        # auto-reply is an unintended second mouth.
+        raise StopResponse()
 
 
 async def _fetch_session_info(room_name: str) -> dict:
