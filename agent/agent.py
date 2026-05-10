@@ -1,18 +1,17 @@
 """LiveKit voice tutor agent worker — state-machine driven.
 
-Runs as a separate process. Registers with LiveKit Cloud and gets dispatched
-into rooms when users join.
-
 Per-session orchestration:
   1. On dispatch, fetch session metadata from /sessions/by-room/{room}.
   2. Build a LessonState over the curriculum.
-  3. Push the first focused TEACH instruction via session.generate_reply.
-  4. After each user turn:
-       a. Call the externalized grader (gpt-4o-mini, JSON schema).
-       b. state.transition(grade) — Python decides next phase.
-       c. If not done, push the next focused instruction.
-  5. After SYNTHESIZE, mark done. Subsequent user turns are ignored.
-  6. On shutdown, POST collected transcript to /sessions/end.
+  3. TutorAgent is initialized with the first phase's focused instruction.
+  4. After each user turn, on_user_turn_completed hook fires BEFORE the
+     agent responds:
+       a. Call externalized grader (gpt-4o-mini, JSON schema).
+       b. state.transition(grade).
+       c. update_instructions to the new phase's prompt.
+       d. The realtime model then auto-generates a reply with the new
+          instructions.
+  5. On shutdown, POST collected transcript to /sessions/end.
 
 Required env: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY
 Optional env: API_BASE_URL (default http://api:8000), GRADER_MODEL,
@@ -21,14 +20,14 @@ Optional env: API_BASE_URL (default http://api:8000), GRADER_MODEL,
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 
 import httpx
 from dotenv import load_dotenv
 from livekit import rtc
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+from livekit.agents import Agent, AgentSession, ChatContext, JobContext, WorkerOptions, cli
+from livekit.agents.llm import ChatMessage
 from livekit.plugins import openai as lk_openai
 
 from curriculum import CURRICULUM
@@ -42,14 +41,59 @@ logging.basicConfig(level=logging.INFO)
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8000")
 
-# NOTE: We do NOT use a static system prompt. The persistent system prompt
-# is rewritten at every phase boundary via agent.update_instructions(...) so
-# the realtime model always sees exactly one focused job — the current
-# phase's prompt. The first phase's instructions seed the Agent on init.
+
+class TutorAgent(Agent):
+    """Agent that runs the structured loop. Hook fires before each agent reply."""
+
+    def __init__(self, state: LessonState, grader: Grader) -> None:
+        super().__init__(instructions=state.current_instruction())
+        self._state = state
+        self._grader = grader
+
+    async def on_user_turn_completed(
+        self, turn_ctx: ChatContext, new_message: ChatMessage
+    ) -> None:
+        if self._state.is_done:
+            return
+
+        user_text = (new_message.text_content or "").strip()
+        if not user_text:
+            return
+
+        concept = self._state.current_concept
+        if concept is None:
+            return
+
+        try:
+            grade = await self._grader.grade(concept, user_text)
+            logger.info(
+                "Grade: concept=%s score=%d gaps=%s phase_before=%s",
+                concept.id, grade.score, grade.gaps, self._state.phase,
+            )
+            self._state.transition(grade)
+            logger.info(
+                "Phase after transition: %s (idx=%d)",
+                self._state.phase, self._state.idx,
+            )
+        except Exception as e:
+            logger.exception("Grading failed: %s", e)
+            return
+
+        if self._state.is_done:
+            return
+
+        new_instruction = self._state.current_instruction()
+        if not new_instruction:
+            return
+
+        await self.update_instructions(new_instruction)
+        if self._state.phase == "synthesize":
+            # The synthesize turn is the last agent turn; mark done so we
+            # don't try to grade further user input.
+            self._state.mark_synthesized()
 
 
 async def _fetch_session_info(room_name: str) -> dict:
-    """Look up the session row created at /token time. Returns {} on failure."""
     try:
         async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=5.0) as http:
             res = await http.get(f"/sessions/by-room/{room_name}")
@@ -80,12 +124,11 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info("Agent dispatched to room: %s", ctx.room.name)
     await ctx.connect()
 
-    # Backend session lookup is harmless even though we're not consuming
-    # resume_transcript in the new state-machine design.
     await _fetch_session_info(ctx.room.name)
 
     state = LessonState(curriculum=CURRICULUM)
     grader = Grader()
+    agent = TutorAgent(state, grader)
 
     session = AgentSession(
         llm=lk_openai.realtime.RealtimeModel(
@@ -94,13 +137,7 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    # The agent's persistent system prompt always equals the current phase's
-    # focused prompt. We mutate it at every phase boundary via
-    # agent.update_instructions(...) so the realtime model has exactly one
-    # source of truth at any moment — defeats its training-prior drift.
-    agent = Agent(instructions=state.current_instruction())
-
-    # Transcript collection for /sessions/end (unchanged from prior behavior)
+    # Transcript collection for /sessions/end
     collected: list[dict] = []
 
     @session.on("conversation_item_added")
@@ -117,63 +154,7 @@ async def entrypoint(ctx: JobContext) -> None:
         if content:
             collected.append({"role": role, "content": content})
 
-    # State-machine orchestration: after each user turn, grade + transition + drive next turn
-    orchestrator_lock = asyncio.Lock()
-
-    async def _orchestrate(user_text: str) -> None:
-        if state.is_done:
-            return
-        concept = state.current_concept
-        if concept is None:
-            return
-
-        try:
-            grade = await grader.grade(concept, user_text)
-            logger.info(
-                "Grade: concept=%s score=%d gaps=%s phase_before=%s",
-                concept.id, grade.score, grade.gaps, state.phase,
-            )
-            state.transition(grade)
-            logger.info("Phase after transition: %s (idx=%d)", state.phase, state.idx)
-        except Exception as e:
-            logger.exception("Orchestration error during grading: %s", e)
-            return
-
-        if state.phase == "done":
-            return
-
-        instruction = state.current_instruction()
-        if not instruction:
-            return
-
-        try:
-            # Replace the persistent system prompt with the new phase's
-            # focused instruction, THEN ask the model to generate a reply.
-            # update_instructions is authoritative; generate_reply(instructions=)
-            # alone gets ignored / merged with priors.
-            await agent.update_instructions(instruction)
-            await session.generate_reply()
-            if state.phase == "synthesize":
-                state.mark_synthesized()
-        except Exception as e:
-            logger.exception("Failed to push next agent turn: %s", e)
-
-    @session.on("user_input_transcribed")
-    def _on_user_turn(event) -> None:  # type: ignore[no-untyped-def]
-        # Some events fire mid-utterance with is_final=False; skip those.
-        if getattr(event, "is_final", True) is False:
-            return
-        text = (getattr(event, "transcript", "") or "").strip()
-        if not text:
-            return
-        # Schedule async orchestration — the event handler itself must return quickly.
-        asyncio.create_task(_orchestrate_safe(text))
-
-    async def _orchestrate_safe(user_text: str) -> None:
-        async with orchestrator_lock:
-            await _orchestrate(user_text)
-
-    # Disconnect handling — explicit click ends fast; network drops fall through to empty_timeout
+    # Disconnect handling — explicit click ends fast; network drops fall through
     shutdown_started = False
 
     @ctx.room.on("participant_disconnected")
@@ -200,9 +181,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(_on_shutdown)
 
-    # Boot the session — agent already initialized with first phase's prompt
     await session.start(agent=agent, room=ctx.room)
-    # Kick off the first TEACH turn (system prompt is already correct)
+    # Kick off the first TEACH turn — agent's instructions are already set
     await session.generate_reply()
 
 

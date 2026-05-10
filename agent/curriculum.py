@@ -37,10 +37,7 @@ HTTP_BASICS = Concept(
         "makes HTTP scale, but it's also what forces every other protocol "
         "we'll discuss to exist."
     ),
-    recall_prompt=(
-        "Given that HTTP is request-response and stateless, name one use case "
-        "where it's the right tool, and one where it starts to feel limiting."
-    ),
+    recall_prompt="What's your understanding of HTTP?",
     rubric=[
         RubricItem(
             description="Identifies a clean request-response use case",
@@ -70,10 +67,7 @@ WEBSOCKETS = Concept(
         "ordered and reliable. WebSockets are the right tool when you need "
         "real-time text-shaped data: chat, presence, live dashboards."
     ),
-    recall_prompt=(
-        "When would you reach for WebSockets over HTTP polling? And when "
-        "would WebSockets be the wrong tool?"
-    ),
+    recall_prompt="What's your understanding of WebSockets?",
     rubric=[
         RubricItem(
             description="Names bidirectional + persistent connection as the key win",
@@ -103,11 +97,7 @@ WEBRTC = Concept(
         "It needs a separate signaling channel (often WebSockets) to "
         "negotiate the connection, and STUN/TURN servers to traverse NATs."
     ),
-    recall_prompt=(
-        "WebRTC isn't just 'faster WebSockets' — what makes it fundamentally "
-        "different, and why does that matter for something like a real-time "
-        "voice tutor?"
-    ),
+    recall_prompt="What's your understanding of WebRTC?",
     rubric=[
         RubricItem(
             description="Identifies UDP vs TCP and the packet-loss tradeoff",
