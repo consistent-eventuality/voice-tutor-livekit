@@ -16,7 +16,7 @@ import os
 
 from openai import AsyncOpenAI
 
-from curriculum import Concept
+from lesson import Concept
 from state_machine import Grade
 
 logger = logging.getLogger("voice-tutor-agent.grader")
@@ -48,18 +48,16 @@ class Grader:
         self._model = model or os.environ.get("GRADER_MODEL", "gpt-4o-mini")
 
     async def grade(self, concept: Concept, user_text: str) -> Grade:
-        rubric_lines = "\n".join(
-            f"- {r.description} (e.g.: {r.ideal_answer})"
-            for r in concept.rubric
-        )
         system = (
             f"You are a strict grader of conceptual understanding. Score the "
             f"user's grasp of {concept.name} from 1 (no understanding) to 10 "
             f"(fully grasped).\n\n"
-            f"Rubric — what to check for:\n{rubric_lines}\n\n"
-            f"Be honest, not polite. Hand-wavy or partial answers should "
-            f"score below 7. Don't reward confidence — reward accuracy and "
-            f"specificity. List concrete gaps in the 'gaps' field."
+            f"Reference — what we taught:\n{concept.teach}\n\n"
+            f"Judge whether the user demonstrates understanding of the core "
+            f"ideas above. Be honest, not polite. Hand-wavy or partial answers "
+            f"should score below 7. Don't reward confidence — reward accuracy "
+            f"and specificity. In the 'gaps' field, list concrete things the "
+            f"user missed or got wrong, in your own words."
         )
 
         try:

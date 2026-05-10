@@ -104,8 +104,8 @@ The four agent files that implement this:
 
 | File | Job |
 |---|---|
-| `agent/curriculum.py` | Concepts + rubrics. Pure data. |
-| `agent/prompts.py` | `teach(concept)`, `reteach(concept, gaps)`, `synthesize(curriculum)`. Single-purpose. |
+| `agent/lesson.py` | Concepts + the ordered `LESSON` list. Pure data. |
+| `agent/prompts.py` | `teach(concept)`, `reteach(concept, gaps)`, `synthesize(lesson)`. Single-purpose. |
 | `agent/grader.py` | `Grader.grade()` — separate gpt-4o-mini call, JSON schema enforced. |
 | `agent/state_machine.py` | `LessonState` — pure Python, deterministic transitions. |
 | `agent/agent.py` | Wires it together. Listens for `user_input_transcribed`, calls grader, transitions state, pushes next focused instruction via `session.generate_reply(instructions=...)`. |
@@ -166,9 +166,9 @@ sessions.
 
 - **`lessons`** — one row per (user, learning thread). Best understood as
   `UserLesson` — the user's enrollment in a content-Lesson. Currently there's
-  only one content-Lesson hardcoded (the 3-concept curriculum), so every row
-  is an instance of the same content. When the curriculum DAG lands, this
-  table will gain a `content_lesson_id` FK.
+  only one content-Lesson hardcoded (the 3-concept `LESSON` in
+  `agent/lesson.py`), so every row is an instance of the same content. When
+  the Curriculum DAG lands, this table will gain a `content_lesson_id` FK.
 - **`sessions`** — one row per LiveKit room joined under a lesson. Holds the
   JSON transcript of that specific connection.
 
@@ -243,7 +243,7 @@ sessions on that pod, not the whole fleet.
 │   └── tests/test_health.py
 ├── agent/            # livekit-agents worker (the engine)
 │   ├── agent.py               # state-machine orchestration; LiveKit integration
-│   ├── curriculum.py          # 3 concepts as fixture data
+│   ├── lesson.py              # 3 concepts as fixture data
 │   ├── prompts.py             # teach() / reteach() / synthesize()
 │   ├── grader.py              # gpt-4o-mini call with JSON-schema response_format
 │   └── state_machine.py       # LessonState; deterministic transitions
@@ -280,12 +280,13 @@ machinery. Each is a clear next step:
   but nothing consumes it across sessions yet.
 - **Multi-attempt reteach.** One re-attempt per concept then move on.
   Production would have escalation rules ("third miss → flag for review").
-- **Curriculum as a DAG.** Current `CURRICULUM` is a flat ordered list. The
-  natural next shape is a DAG where each node is a concept-loop instance and
-  edges encode prerequisites. The state machine would walk the DAG: branch
-  into sub-topics on weak answers, skip ahead when prereqs are clearly
-  mastered, surface "you're ready for X next" affordances. The per-concept
-  loop machinery built here is the unit; a DAG just composes them.
+- **Curriculum as a DAG.** Current `LESSON` is a flat ordered list of
+  concepts. The natural next shape is a *Curriculum* — a DAG of Lessons with
+  prereq edges between them. The state machine would walk the DAG: branch
+  into sub-lessons on weak answers, skip ahead when prereqs are clearly
+  mastered, surface "you're ready for X next" affordances. The Concept-loop
+  machinery built here is the unit; Lessons compose Concepts; a Curriculum
+  composes Lessons.
 - **Reconnect / brief disconnect tolerance** — partly handled. On
   `participant_disconnected` we branch on `DisconnectReason`: explicit
   disconnect tears down immediately; network drops fall through to LiveKit's

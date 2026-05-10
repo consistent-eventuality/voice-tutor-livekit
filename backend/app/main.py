@@ -217,7 +217,12 @@ class SessionEndResponse(BaseModel):
 async def end_session(body: SessionEndRequest, db: ORMSession = Depends(get_db)) -> SessionEndResponse:
     session = db.query(TutorSession).filter(TutorSession.room_name == body.room_name).first()
     if not session:
-        raise HTTPException(status_code=404, detail="session not found")
+        # Orphan room — agent was dispatched to a room whose row isn't in the DB.
+        # Most likely a stale LiveKit room from a previous run, or a fast
+        # double-click that minted two tokens. Best-effort: log and return 200
+        # so the agent's shutdown callback doesn't surface a noisy warning.
+        logger.warning("orphan /sessions/end for room=%s — no DB row, ignoring", body.room_name)
+        return SessionEndResponse(status="orphan")
 
     user_msgs = [
         m for m in body.transcript

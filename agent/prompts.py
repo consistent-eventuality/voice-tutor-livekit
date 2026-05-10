@@ -1,69 +1,51 @@
-"""Focused, single-purpose prompts driven by the lesson state machine.
+"""Spoken-text builders for the structured tutoring loop.
 
-Each function returns the instruction the realtime agent receives for ONE
-turn. We push these via session.generate_reply(instructions=...) so the
-agent's persistent system prompt stays minimal — every turn sees exactly
-one job.
+Each function returns the exact text the agent will say via
+`AgentSession.say()` — no LLM is involved in producing this content. The
+realtime model's `generate_reply` path is bypassed entirely; the only
+LLM call in the agent flow is the grader.
 
-These prompts are first-cut fixture, not iteratively tuned. The artifact
-is the orchestration boundary, not the wording.
+Three phases get spoken text:
+  * teach      — read the concept's curated content, ask a recall question
+  * reteach    — re-read the concept with a brief lead-in (v1)
+  * synthesis  — read the lesson-level closing summary
 """
 
 from __future__ import annotations
 
-from curriculum import Concept
+from lesson import Concept
 
 
-# Every prompt opens with this domain lock. OpenAI Realtime's training
-# prior leans heavily into language-learning / pronunciation tutoring (it's
-# been fine-tuned for products like Speak). Without an aggressive lock, the
-# model drifts into "let's practice 'the cat sat on the mat'" mode within
-# a couple of turns. This text appears at the top of every per-phase prompt.
-_DOMAIN_LOCK = (
-    "You are a voice tutor for COMPUTER NETWORKING and WEB COMMUNICATION "
-    "PROTOCOLS — specifically HTTP, WebSockets, and WebRTC. "
-    "You are NOT a language tutor. You are NOT a pronunciation coach. "
-    "You are NOT a speech therapist. You are NOT teaching English or any "
-    "other language. NEVER use sentences like 'the cat sat on the mat'. "
-    "NEVER focus on the user's pronunciation, accent, or fluency. "
-    "If the user says something off-topic, redirect to the current concept."
-)
+def teach_text(concept: Concept) -> str:
+    return f"{concept.teach} What's your understanding of {concept.name}?"
 
 
-def teach(concept: Concept) -> str:
+def reteach_text(concept: Concept, gaps: list[str]) -> str:
+    """Spoken text for the reteach phase.
+
+    v1: re-reads the concept's curated teach content with a brief lead-in.
+    The `gaps` argument is accepted but unused — the grader's specific
+    feedback on what the user missed is preserved in `state.last_gaps`
+    for the future enhancement.
+
+    Future enhancement: replace the static re-read with a separate
+    `gpt-4o-mini` text-completion call (e.g. an `agent/reteacher.py`
+    module mirroring `agent/grader.py`) that takes (concept, gaps) and
+    produces a 2-3 sentence explanation tailored to the user's specific
+    misunderstanding. The state machine and gap plumbing already support
+    this — only this function needs to change.
+    """
+    _ = gaps  # parked for the future tailored-reteach enhancement
     return (
-        f"{_DOMAIN_LOCK}\n\n"
-        f"YOUR CURRENT JOB: Teach the concept '{concept.name}' to the user. "
-        f"Do this exactly once, then stop and wait for them.\n\n"
-        f"Step 1: Explain {concept.name} in 2-3 sentences in your own words. "
-        f"Use this content as reference:\n"
-        f"{concept.teach}\n\n"
-        f'Step 2: End your turn by asking: "{concept.recall_prompt}"\n\n'
-        f"Don't grade their previous answer. Don't continue past the question. "
-        f"Just teach + ask + stop."
+        f"Let me walk through that one more time. "
+        f"{concept.teach} What's your understanding of {concept.name} now?"
     )
 
 
-def reteach(concept: Concept, gaps: list[str]) -> str:
-    gap_text = "; ".join(gaps) if gaps else "the core idea"
-    return (
-        f"{_DOMAIN_LOCK}\n\n"
-        f"YOUR CURRENT JOB: The user just struggled with '{concept.name}', "
-        f"specifically: {gap_text}.\n\n"
-        f"Re-explain {concept.name} in different words, addressing that gap "
-        f"directly. Be more concrete or use an analogy from networking or "
-        f'web development. Then ask: "{concept.recall_prompt}"\n\n'
-        f"Don't apologize or signal that you're re-teaching. Just teach "
-        f"better. Then stop."
-    )
+def closing_text() -> str:
+    """Brief spoken line after the user has passed every concept.
 
-
-def synthesize(curriculum: list[Concept]) -> str:
-    names = ", ".join(c.name for c in curriculum)
-    return (
-        f"{_DOMAIN_LOCK}\n\n"
-        f"YOUR CURRENT JOB: You've covered: {names}. In 2-3 sentences, tie "
-        f"them together — how they relate, when each is the right tool. "
-        f"Then end by saying something like \"great work, hit disconnect "
-        f'when you\'re ready." Then stop.'
-    )
+    Audibly signals the end of the lesson before the session disconnects.
+    """
+    from lesson import LESSON_CLOSING
+    return LESSON_CLOSING

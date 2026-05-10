@@ -5,20 +5,32 @@ no LLM calls, easy to unit test. The realtime agent and grader sit on
 either side of this.
 
 States:
-    teach        — about to teach the current concept (initial state per concept)
-    reteach      — current concept's first attempt failed; one re-attempt allowed
-    synthesize   — all concepts covered, about to wrap up
-    done         — synthesis sent, lesson over
+    teach    — about to teach the current concept (initial state per concept)
+    reteach  — last attempt on the current concept failed; will re-explain
+    done     — user has passed every concept in the lesson
+
+Transition rule (simple):
+    pass (score >= PASS_THRESHOLD) → advance to next concept (or done if last)
+    fail (score < PASS_THRESHOLD)  → reteach (record gaps), stay on concept
+
+Synthesis is just the last concept in `LESSON`, no longer a special phase.
+The lesson ends when the user passes the last concept; the agent then
+speaks a brief closing line (handled in agent.py, not here).
+
+A user who keeps failing stays on the same concept indefinitely. Future
+enhancements (parked):
+    - upper bound on reteach attempts (after N misses, advance regardless)
+    - user-facing "skip" option ("I want to move on")
+    - tailored reteach via a Reteacher LLM that uses last_gaps
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import prompts
-from curriculum import Concept
+from lesson import Concept
 
-PASS_THRESHOLD = 7  # ≥ this is "good enough to move on"
+PASS_THRESHOLD = 2  # ≥ this is "good enough to move on"
 
 
 @dataclass
@@ -28,58 +40,44 @@ class Grade:
 
 
 class LessonState:
-    def __init__(self, curriculum: list[Concept]) -> None:
-        self.curriculum = curriculum
+    def __init__(self, lesson: list[Concept]) -> None:
+        self.lesson = lesson
         self.idx = 0
-        self.phase: str = "teach"  # teach | reteach | synthesize | done
+        self.phase: str = "teach"  # teach | reteach | done
         self.last_gaps: list[str] = []
 
     @property
     def current_concept(self) -> Concept | None:
-        if self.idx >= len(self.curriculum):
+        if self.idx >= len(self.lesson):
             return None
-        return self.curriculum[self.idx]
+        return self.lesson[self.idx]
 
     @property
     def is_done(self) -> bool:
         return self.phase == "done"
 
     def transition(self, grade: Grade) -> None:
-        """Apply a grade to the current concept and advance.
+        """Apply a grade to the current concept.
 
-        teach     + pass → next concept (or synthesize if last)
-        teach     + fail → reteach (gaps recorded)
-        reteach   + any  → next concept regardless (one re-attempt only)
+        pass → advance to next concept (or synthesize if last)
+        fail → reteach (gaps recorded), stay on the same concept
+
+        The teach/reteach distinction is purely about spoken wording —
+        a fresh concept opens with `teach` (no lead-in), subsequent
+        re-attempts use `reteach` (with a brief lead-in).
         """
-        if self.phase == "teach":
+        if self.phase in ("teach", "reteach"):
             if grade.score >= PASS_THRESHOLD:
                 self._advance()
             else:
                 self.phase = "reteach"
                 self.last_gaps = grade.gaps
-        elif self.phase == "reteach":
-            self._advance()
         # synthesize / done — no further transitions on grades
 
     def _advance(self) -> None:
         self.idx += 1
-        if self.idx >= len(self.curriculum):
-            self.phase = "synthesize"
+        if self.idx >= len(self.lesson):
+            self.phase = "done"
         else:
             self.phase = "teach"
             self.last_gaps = []
-
-    def mark_synthesized(self) -> None:
-        self.phase = "done"
-
-    def current_instruction(self) -> str:
-        """Return the prompt for the agent's NEXT turn, given the current phase."""
-        if self.phase == "teach":
-            assert self.current_concept is not None
-            return prompts.teach(self.current_concept)
-        if self.phase == "reteach":
-            assert self.current_concept is not None
-            return prompts.reteach(self.current_concept, self.last_gaps)
-        if self.phase == "synthesize":
-            return prompts.synthesize(self.curriculum)
-        return ""  # done
