@@ -1,11 +1,32 @@
 # voice-tutor-livekit
 
-A real-time voice AI tutor built on [LiveKit](https://livekit.io). The user
-talks, the tutor talks back — bidirectional, low-latency, in the browser.
+A real-time voice AI tutor for **communication protocols** (HTTP, WebSockets,
+WebRTC) built on [LiveKit](https://livekit.io). The product isn't the LLM
+teaching — it's the **loop machinery** that turns "voice ChatGPT" into a
+structured tutor: teach → grade → adapt.
 
-The tutor's subject is intentionally open-ended in this scaffold: the agent
-asks the user what they'd like to learn and teaches whatever they pick. See
-[Parked decisions](#parked-decisions) for a topic shortlist.
+## What's actually being demonstrated
+
+Three layers of composition. Only the bottom layer is built in this take-home;
+the rest is parked but the design is intentional.
+
+```
+Curriculum  =  DAG of Lessons (with prereq edges)              ← parked
+Lesson      =  ordered list of Concepts (~3-5)                 ← built (3 concepts)
+Concept     =  the loop primitive (TEACH → GRADE → RETEACH?)   ← THE ENGINE
+```
+
+The Concept primitive is what makes this not a wrapper around ChatGPT-with-voice:
+
+| Concern | Realized as |
+|---|---|
+| Speak this turn (user-facing voice) | OpenAI Realtime, **single-purpose prompt per turn** |
+| Grade the user's last answer | `gpt-4o-mini` text completion, **separate call**, **`response_format` JSON schema enforced** |
+| Decide next action | **Python `if`** — `if grade.score >= 7: advance()` |
+
+Each LLM call has prose for one task only. The if-statement lives in Python
+where if-statements work. The realtime model never has to police itself
+across multi-step instructions.
 
 ## Quickstart
 
@@ -14,8 +35,9 @@ cp .env.example .env   # then fill in 4 keys (see below)
 docker compose up --build
 ```
 
-Then open <http://localhost:5173>, click **Start session**, allow microphone
-access, and start talking.
+Open <http://localhost:5173>, click **Start new lesson**, allow microphone
+access, and start talking. The agent will run you through HTTP basics →
+WebSockets → WebRTC, then give a short synthesis tying them together.
 
 > **Env precedence.** Compose reads variables from your shell first, falling
 > back to the `.env` file. If you already export `LIVEKIT_*` and
@@ -29,7 +51,7 @@ access, and start talking.
 | `LIVEKIT_URL` | <https://cloud.livekit.io> → Project → Settings (starts with `wss://`) |
 | `LIVEKIT_API_KEY` | Same place → Keys → Create new key |
 | `LIVEKIT_API_SECRET` | Same key, shown only once at creation |
-| `OPENAI_API_KEY` | <https://platform.openai.com/api-keys> (Realtime API access) |
+| `OPENAI_API_KEY` | <https://platform.openai.com/api-keys> (Realtime + chat completions access) |
 
 ### Verifying it's up
 
@@ -37,16 +59,63 @@ access, and start talking.
 curl http://localhost:8000/health
 # {"status":"ok"}
 
-curl -X POST http://localhost:8000/token -H 'content-type: application/json' -d '{}'
-# {"token":"eyJ...","url":"wss://...","room_name":"tutor-...","identity":"guest-..."}
+docker logs voice-tutor-agent | grep "registered worker"
+# INFO:livekit.agents:registered worker  {"agent_name": "", ...}
 ```
+
+After a session, the agent log will show grading lines:
+```
+INFO:voice-tutor-agent:Grade: concept=HTTP_BASICS score=8 gaps=[] phase_before=teach
+INFO:voice-tutor-agent:Phase after transition: teach (idx=1)
+```
+
+## The Concept loop, in detail
+
+```
+                  ┌─ Python pushes focused instruction ─┐
+                  │   prompts.teach(concept N)          │
+                  ▼                                     │
+  ┌──────────────────────┐                              │
+  │  Realtime agent      │ ── speaks turn ──▶  user     │
+  │ (one job per turn)   │ ◀── listens ──               │
+  └──────────┬───────────┘                              │
+             │ user finishes (turn detected)            │
+             ▼                                          │
+  ┌──────────────────────────────────────────┐          │
+  │  grader.grade(concept, user_text)        │          │
+  │   → gpt-4o-mini, response_format JSON    │          │
+  │   → returns {score: int, gaps: list[str]}│          │
+  └──────────┬───────────────────────────────┘          │
+             ▼                                          │
+  ┌──────────────────────────────────────────────┐      │
+  │  state.transition(grade) — Python if/else    │      │
+  │    score >= 7  → next concept (or DONE)      │      │
+  │    score <  7  → RETEACHING (one attempt)    │      │
+  │    already retaught → next concept regardless│      │
+  └──────────┬───────────────────────────────────┘      │
+             │                                          │
+             └──────────────────────────────────────────┘
+                              loop until DONE → synthesize
+```
+
+Lesson states: `teach(N)` → `reteach(N, gaps)` → next → ... → `synthesize` → `done`.
+
+The four agent files that implement this:
+
+| File | Job |
+|---|---|
+| `agent/curriculum.py` | Concepts + rubrics. Pure data. |
+| `agent/prompts.py` | `teach(concept)`, `reteach(concept, gaps)`, `synthesize(curriculum)`. Single-purpose. |
+| `agent/grader.py` | `Grader.grade()` — separate gpt-4o-mini call, JSON schema enforced. |
+| `agent/state_machine.py` | `LessonState` — pure Python, deterministic transitions. |
+| `agent/agent.py` | Wires it together. Listens for `user_input_transcribed`, calls grader, transitions state, pushes next focused instruction via `session.generate_reply(instructions=...)`. |
 
 ## Architecture
 
 ```
 ┌─────────┐  POST /token   ┌──────────────────┐
 │ Browser │───────────────▶│ FastAPI (api)    │  mints short-lived JWT
-│ (React) │◀───────────────│ port 8000        │
+│ (React) │◀───────────────│ port 8000        │  persists lesson + sessions
 └────┬────┘                └──────────────────┘
      │
      │ WebRTC connect (token in handshake)
@@ -58,89 +127,86 @@ curl -X POST http://localhost:8000/token -H 'content-type: application/json' -d 
 └──────────┬───────────────────────────────────┘
            │ outbound WebSocket
            ▼
-┌────────────────────────────────────┐
-│ Agent worker (livekit-agents)      │
-│   joins room as 2nd participant    │
-│   ─ subscribes to user's audio     │
-│   ─ runs OpenAI Realtime           │
-│     (STT + LLM + TTS in one model) │
-│   ─ publishes agent audio back     │
-└────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ Agent worker (livekit-agents)                │
+│   ─ joins room as 2nd participant            │
+│   ─ Realtime model speaks (per-turn prompts) │
+│   ─ Grader (gpt-4o-mini) judges each user    │
+│     turn against rubric → JSON {score, gaps} │
+│   ─ Python state machine decides next phase  │
+└──────────────────────────────────────────────┘
 ```
 
 Three services, each with one job:
 
 - **`backend/`** (FastAPI + SQLite) mints LiveKit access tokens, persists
-  lessons, and serves the agent's "what's the prior context for this room?"
-  query. Stateless except for the SQLite file under `data/`.
-- **`agent/`** (livekit-agents worker) is a long-lived process that registers
-  with LiveKit Cloud. When a user joins a room, the dispatcher assigns this
-  worker; it joins the room as a participant, runs the voice loop, and leaves
-  when the user does. On dispatch it fetches prior-lesson context from the
-  backend; on shutdown it posts the new transcript back.
+  lessons + transcripts. Stateless except for the SQLite file under `data/`.
+- **`agent/`** (livekit-agents worker) is a long-lived process registered with
+  LiveKit Cloud. When a user joins a room, the dispatcher assigns this worker;
+  the worker runs the structured loop (state machine + grader + focused
+  prompts) until the user disconnects.
 - **`frontend/`** (Vite + React) is the UI: home view with past-lessons list,
-  voice panel with `<LiveKitRoom>`, visualizer, and the LiveKit control bar.
+  voice panel with `<LiveKitRoom>`, visualizer, control bar.
 
 Token minting and voice/AI logic live in different processes so they scale
 independently — one is HTTP request/response, the other is long-lived WebRTC
 sessions.
 
-## Resumable lessons
-
-The data model has two tables:
-
-- **`lessons`** — the persistent learning thread. One row per topic the user
-  has explored. Has a `topic` derived from the first user utterance.
-- **`sessions`** — one row per LiveKit room joined. Children of a lesson.
-  Holds the JSON transcript for that specific connection.
-
-When the user clicks **Resume** on a past lesson, the API attaches a new
-`sessions` row to that existing lesson. On dispatch, the agent calls
-`GET /sessions/by-room/{room}` and the API returns the concatenated
-transcript across all prior sessions of that lesson. The agent seeds its
-instructions with that history and continues.
-
-User identity is an anonymous UUID generated client-side and stored in
-`localStorage` — no auth required, but persistent enough for "come back
-tomorrow."
-
-### Endpoints at a glance
+### Endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Smoke test |
 | `POST` | `/token` | Mint LiveKit JWT, create lesson + session rows. Pass `lesson_id` to resume. |
-| `GET` | `/lessons?user_id=...` | List the user's lessons (most recent activity first). |
-| `GET` | `/sessions/by-room/{room_name}` | Agent fetches this on dispatch — returns concatenated prior-lesson transcript. |
+| `GET` | `/lessons?user_id=...` | List the user's lessons (most recent first). |
+| `GET` | `/sessions/by-room/{room_name}` | Agent fetches this on dispatch — returns prior transcripts on resume (currently unused by the new state machine but kept for future cross-session adaptation). |
 | `POST` | `/sessions/end` | Agent posts here on shutdown with the new transcript. Discards empty sessions. |
+
+### Persistence (lessons + sessions)
+
+- **`lessons`** — one row per (user, learning thread). Best understood as
+  `UserLesson` — the user's enrollment in a content-Lesson. Currently there's
+  only one content-Lesson hardcoded (the 3-concept curriculum), so every row
+  is an instance of the same content. When the curriculum DAG lands, this
+  table will gain a `content_lesson_id` FK.
+- **`sessions`** — one row per LiveKit room joined under a lesson. Holds the
+  JSON transcript of that specific connection.
+
+User identity is an anonymous UUID generated client-side and stored in
+`localStorage` — no auth required, but persistent enough for "come back
+tomorrow" continuity.
 
 ## Design decisions
 
-**OpenAI Realtime end-to-end.** The agent uses
+**Externalized grading (this is the big one).** Realtime models routinely
+drift from multi-step prose instructions. "If grade < 7 then reteach" works
+in testing and silently fails in prod. Function calling on the realtime
+model has the same flaw — *whether* to call the tool is still prose-driven.
+So grading is moved out of the realtime model entirely: a separate
+`gpt-4o-mini` text completion with `response_format: json_schema(strict)`,
+which the OpenAI API itself validates. The realtime model only ever has one
+job per turn (speak the current state's prompt). The if-statement lives in
+Python.
+
+**OpenAI Realtime end-to-end for voice.** The agent uses
 `livekit.plugins.openai.realtime.RealtimeModel` for STT + LLM + TTS in one
-model. Tradeoffs: lowest latency (~500ms speech-to-speech), one provider, one
-API key, ~30 LOC in `agent.py`. The pipelined alternative (Deepgram STT +
-OpenAI LLM + Cartesia TTS + Silero VAD) gives finer control over each stage
-and best-in-class TTS, at the cost of 4 API keys, more plugins, and ~300ms
-extra latency. A commented-out config block is preserved in `agent.py` to
-show the swap path.
+model. Tradeoffs: lowest latency (~500ms speech-to-speech), one provider for
+voice. The pipelined alternative (Deepgram STT + OpenAI LLM + Cartesia TTS +
+Silero VAD) gives finer control at the cost of 4 plugins, more keys, and
+~300ms extra latency. A commented config block in `agent.py` shows the swap.
 
 **Separate agent worker process.** The agent could in principle be embedded
 in FastAPI via background tasks, but that would couple HTTP concurrency
 (many short requests) to WebRTC concurrency (few long sessions) and lose the
-LiveKit dispatcher's worker-pool semantics. Two clean services is the
-canonical pattern.
+LiveKit dispatcher's worker-pool semantics. Two clean services is canonical.
 
-**SQLite for lesson persistence.** A single file at `data/voice_tutor.db`,
-two tables (`lessons`, `sessions`), no migrations framework. Sufficient for
-single-instance deployment — the migration to Postgres is one URL change.
+**SQLite for persistence.** Single file at `data/voice_tutor.db`, two tables,
+no migrations framework. Postgres swap is one URL change.
 
-**No auth.** Reviewers shouldn't have to sign up to talk to the tutor. If
-multi-user persistence becomes a goal, drop in a JWT middleware on the
-`/token` endpoint.
+**No auth.** Reviewers shouldn't have to sign up. JWT middleware on `/token`
+is the drop-in for real multi-user.
 
-**Plain `os.getenv` config.** Mirrors the broader codebase style; no
-`pydantic-settings` to keep dep surface minimal.
+**Plain `os.getenv` config.** No `pydantic-settings`. Minimal dep surface.
 
 ## Scaling to 10k concurrent sessions
 
@@ -148,19 +214,19 @@ Two axes scale separately:
 
 - **Token API (FastAPI)** is stateless and trivial to horizontally scale —
   put it behind any HTTP autoscaler (k8s HPA, ECS, Railway). 10k sessions
-  doesn't mean 10k token-mints/sec; it's a one-time call per session join.
-  A handful of pods is enough.
+  doesn't mean 10k token-mints/sec; it's one call per session join.
 - **Agent worker pool** is the harder one. Each worker handles N concurrent
   sessions (tunable via `WorkerOptions.num_idle_processes`). For 10k:
-  - Run agent workers as a horizontally-scaled stateless Deployment in k8s
-    or ECS, scaled on CPU + active-session count.
-  - LiveKit Cloud handles SFU/TURN scaling automatically. For self-hosting,
-    you'd run a LiveKit cluster with Redis for session state and TURN
-    servers for NAT traversal.
-  - Add Postgres + Redis if persistence (transcripts, resumability) is
-    introduced.
-  - Watch OpenAI Realtime rate limits — at this scale you'd negotiate
-    higher quotas or pool across multiple keys.
+  - Run agent workers as a horizontally-scaled stateless Deployment, scaled
+    on CPU + active-session count.
+  - LiveKit Cloud handles SFU/TURN auto-scaling. Self-hosting would mean
+    running a LiveKit cluster + Redis + TURN servers.
+  - Swap SQLite for Postgres + Redis if persistence grows.
+  - Watch OpenAI rate limits — at this scale you'd negotiate higher quotas
+    or pool across keys. The grader (`gpt-4o-mini`) has separate quotas from
+    the realtime model.
+  - The Python state machine is per-job (per worker subprocess), so it's
+    stateless across workers. No cross-worker coordination needed.
 
 The single-process-per-pod model means a worker crash kills only the
 sessions on that pod, not the whole fleet.
@@ -171,12 +237,16 @@ sessions on that pod, not the whole fleet.
 .
 ├── backend/          # FastAPI + SQLite
 │   ├── app/
-│   │   ├── main.py            # endpoints: /health, /token, /lessons, /sessions/...
+│   │   ├── main.py            # /health, /token, /lessons, /sessions/...
 │   │   ├── db.py              # SQLAlchemy: Lesson + TutorSession models
 │   │   └── livekit_token.py
-│   └── tests/test_health.py   # 6 tests covering token + lesson resume flow
-├── agent/            # livekit-agents worker (long-lived)
-│   └── agent.py
+│   └── tests/test_health.py
+├── agent/            # livekit-agents worker (the engine)
+│   ├── agent.py               # state-machine orchestration; LiveKit integration
+│   ├── curriculum.py          # 3 concepts as fixture data
+│   ├── prompts.py             # teach() / reteach() / synthesize()
+│   ├── grader.py              # gpt-4o-mini call with JSON-schema response_format
+│   └── state_machine.py       # LessonState; deterministic transitions
 ├── frontend/         # Vite + React + TS + Tailwind v4
 │   └── src/
 │       ├── App.tsx
@@ -186,70 +256,78 @@ sessions on that pod, not the whole fleet.
 │       └── components/
 │           ├── Home.tsx       # past-lessons list + Start new
 │           └── VoicePanel.tsx # in-session voice UI
-├── data/             # SQLite file lives here (gitignored)
+├── data/             # SQLite file (gitignored)
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
 ```
 
-## TODO before submission
+## Out of scope (deliberately)
 
-- [ ] **Spin up a dedicated LiveKit Cloud project for this take-home.**
-  During development this scaffold reuses an existing personal LiveKit project,
-  which means tutor sessions count against that project's quota. Before
-  submitting, create a fresh project at <https://cloud.livekit.io>, generate
-  new API key + secret, and update `LIVEKIT_URL` / `LIVEKIT_API_KEY` /
-  `LIVEKIT_API_SECRET`.
+These are explicitly parked so the take-home stays focused on the loop
+machinery. Each is a clear next step:
 
-## Parked decisions
-
-These were intentionally deferred so the scaffold is easy to evaluate. Each
-is a small, contained extension:
-
-- **Tutor topic.** The agent currently asks the user what they want to learn.
-  Candidate fixed subjects: cocktail mixology, chess openings, music theory,
-  obscure history. To pick one, edit `TUTOR_INSTRUCTIONS` in `agent/agent.py`.
-- **Session resumability — implemented.** See [Resumable lessons](#resumable-lessons)
-  above. Past lessons appear on the home screen; clicking one resumes with
-  full prior-conversation context fed to the agent.
-- **Post-session summary** *(deferred)*. Right now the agent receives the full
-  prior transcript on resume. For long lessons (30min+), this dilutes the
-  agent's working context. The fix is a one-shot LLM call at session end that
-  produces a 2-sentence summary stored on the `lessons` row, with the agent
-  receiving "summary of older sessions + verbatim of latest session."
-- **Reconnect / brief disconnect tolerance** *(deferred)*. LiveKit's
-  `empty_timeout` would let the agent stay in the room for ~60s after the
-  user drops, so a refresh or network blip doesn't end the session. One field
-  on the room-create call.
-- **Auth.** No auth in the scaffold; user identity is an anonymous UUID in
-  localStorage. JWT middleware on `/token` would be the drop-in for real
-  multi-user.
+- **Curriculum content quality and breadth.** 3 fixture concepts. Production
+  wants 30+, expert-written, editorially reviewed.
+- **Prompt tuning.** Every prompt (TEACH / RETEACH / SYNTHESIZE / GRADE) is
+  first-cut. A real ship would A/B variations against held-out transcripts to
+  tune wording, the grading threshold, the reteach behavior.
+- **Persisting grades.** `Grade` flows through Python in-session but isn't
+  written to DB. The natural next step is a per-(session, concept) grades
+  table for cross-session use.
+- **Cross-session adaptation.** Home doesn't show mastery dots; the agent
+  doesn't get prior mastery in its instructions. The transcript is in the DB,
+  but nothing consumes it across sessions yet.
+- **Multi-attempt reteach.** One re-attempt per concept then move on.
+  Production would have escalation rules ("third miss → flag for review").
+- **Curriculum as a DAG.** Current `CURRICULUM` is a flat ordered list. The
+  natural next shape is a DAG where each node is a concept-loop instance and
+  edges encode prerequisites. The state machine would walk the DAG: branch
+  into sub-topics on weak answers, skip ahead when prereqs are clearly
+  mastered, surface "you're ready for X next" affordances. The per-concept
+  loop machinery built here is the unit; a DAG just composes them.
+- **Reconnect / brief disconnect tolerance** — partly handled. On
+  `participant_disconnected` we branch on `DisconnectReason`: explicit
+  disconnect tears down immediately; network drops fall through to LiveKit's
+  `empty_timeout` so a brief blip doesn't end the session. Real reconnect
+  with localStorage-stored `room_name` is parked.
+- **Session resumability in agent prompts.** The agent fetches prior
+  transcripts on dispatch but doesn't currently use them — out of scope until
+  cross-session adaptation lands.
+- **Auth.** Anonymous UUID in localStorage. JWT middleware on `/token` is
+  the drop-in.
+- **Frontend mastery UI.** Past lessons are listed with a topic derived from
+  the user's first utterance — likely awkward fragments. Mastery indicators
+  would surface here.
 
 ## Gotchas
 
 - `LIVEKIT_URL` must start with `wss://`, not `https://`.
-- Microphone permission requires `localhost` or HTTPS — testing via your
-  LAN IP will fail silently with no audio.
+- Microphone permission requires `localhost` or HTTPS — testing via your LAN
+  IP will fail silently with no audio.
 - Hot-reload (`agent.py dev`) doesn't re-join rooms that are already live;
   refresh the browser after agent code edits.
 - The agent worker must be able to reach LiveKit Cloud over outbound
   WebSocket. If it boots and immediately exits, check `LIVEKIT_API_KEY` /
   `LIVEKIT_API_SECRET`.
+- The grader is a separate API call (gpt-4o-mini text completion) per user
+  turn. It's fast (~500ms-1s) but adds noticeable pause between you finishing
+  speaking and the tutor's next turn.
 
 ## Running pieces individually
 
-If you'd rather not use Docker for local dev:
+If you'd rather not use Docker:
 
 ```bash
 # api
 cd backend && pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 
-# agent (in another terminal, same .env loaded)
+# agent (in another terminal, same .env)
 cd agent && pip install -r requirements.txt
 python agent.py dev
 
-# frontend (in another terminal)
+# frontend
 cd frontend && npm install && npm run dev
 ```
 
@@ -259,5 +337,16 @@ cd frontend && npm install && npm run dev
 cd backend && pytest
 ```
 
-Two endpoints are covered (`/health` and `/token` shape). Frontend has no
-test runner wired up — out of scope for the scaffold.
+6 tests cover token + lesson resume flow. The agent's state machine and
+grader don't have automated tests in this build — both are pure functions
+that would be straightforward to test, but loop fidelity is qualitative
+(does the model actually speak the focused turn?) and depends on prompt
+quality which is fixture/out-of-scope.
+
+## TODO before submission
+
+- [ ] **Spin up a dedicated LiveKit Cloud project for this take-home.**
+  This scaffold currently reuses an existing personal LiveKit project for
+  development. Before submitting, create a fresh project at
+  <https://cloud.livekit.io>, generate new API key + secret, and update
+  `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`.

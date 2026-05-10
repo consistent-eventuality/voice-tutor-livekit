@@ -1,26 +1,27 @@
-"""LiveKit voice tutor agent worker.
+"""LiveKit voice tutor agent worker — state-machine driven.
 
 Runs as a separate process. Registers with LiveKit Cloud and gets dispatched
-into rooms when users join. One agent process can serve multiple concurrent
-sessions; scale horizontally by running more processes (k8s/ECS).
+into rooms when users join.
 
-On dispatch the agent:
-  1. Calls the API at /sessions/by-room/{room} to fetch session metadata
-     (including any prior transcript if the user clicked Resume).
-  2. Seeds its instructions with the prior transcript when present.
-  3. Collects new transcript items via conversation_item_added events.
-  4. POSTs the full transcript to /sessions/end on shutdown.
-
-Run locally:
-    python agent.py dev      # hot-reload, attaches to LiveKit Cloud
-    python agent.py start    # production worker
+Per-session orchestration:
+  1. On dispatch, fetch session metadata from /sessions/by-room/{room}.
+  2. Build a LessonState over the curriculum.
+  3. Push the first focused TEACH instruction via session.generate_reply.
+  4. After each user turn:
+       a. Call the externalized grader (gpt-4o-mini, JSON schema).
+       b. state.transition(grade) — Python decides next phase.
+       c. If not done, push the next focused instruction.
+  5. After SYNTHESIZE, mark done. Subsequent user turns are ignored.
+  6. On shutdown, POST collected transcript to /sessions/end.
 
 Required env: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY
-Optional env: API_BASE_URL (default http://api:8000)
+Optional env: API_BASE_URL (default http://api:8000), GRADER_MODEL,
+              OPENAI_REALTIME_MODEL
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -28,7 +29,11 @@ import httpx
 from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
-from livekit.plugins import openai
+from livekit.plugins import openai as lk_openai
+
+from curriculum import CURRICULUM
+from grader import Grader
+from state_machine import LessonState
 
 load_dotenv()
 
@@ -37,28 +42,11 @@ logging.basicConfig(level=logging.INFO)
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8000")
 
-TUTOR_INSTRUCTIONS = (
-    "You are a friendly, patient voice tutor. "
-    "Always respond in English unless the user explicitly asks you to switch "
-    "languages. "
-    "Greet the user warmly and ask what they'd like to learn about today. "
-    "Once they pick a topic, teach in short, conversational turns: explain a "
-    "concept in 2-3 sentences, then ask a check-in question to make sure they "
-    "follow. Keep your tone encouraging. The subject is open-ended for now."
+BASE_INSTRUCTIONS = (
+    "You are a structured voice tutor. Always respond in English. "
+    "You only do exactly what each turn's instructions tell you. "
+    "Keep turns short (1-3 sentences). End every turn cleanly — don't run on."
 )
-
-
-def _format_resume_block(transcript: list[dict]) -> str:
-    """Render prior turns as a transcript block to seed the agent's context."""
-    lines = []
-    for msg in transcript:
-        role = msg.get("role", "?")
-        content = (msg.get("content") or "").strip()
-        if not content:
-            continue
-        speaker = "User" if role == "user" else "Tutor"
-        lines.append(f"{speaker}: {content}")
-    return "\n".join(lines)
 
 
 async def _fetch_session_info(room_name: str) -> dict:
@@ -93,39 +81,21 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info("Agent dispatched to room: %s", ctx.room.name)
     await ctx.connect()
 
-    info = await _fetch_session_info(ctx.room.name)
-    resume_transcript = info.get("resume_transcript") or []
+    # Backend session lookup is harmless even though we're not consuming
+    # resume_transcript in the new state-machine design.
+    await _fetch_session_info(ctx.room.name)
 
-    instructions = TUTOR_INSTRUCTIONS
-    if resume_transcript:
-        prior = _format_resume_block(resume_transcript)
-        instructions += (
-            "\n\nThe user is resuming a prior session. Here is what was said "
-            "last time, in order:\n---\n"
-            f"{prior}\n---\n"
-            "Greet them by acknowledging you're picking up where you left off, "
-            "briefly recap the topic in one sentence, and continue teaching. "
-            "Don't repeat content verbatim."
-        )
-        logger.info("Resuming with %d prior turns", len(resume_transcript))
+    state = LessonState(curriculum=CURRICULUM)
+    grader = Grader()
 
     session = AgentSession(
-        llm=openai.realtime.RealtimeModel(
+        llm=lk_openai.realtime.RealtimeModel(
             voice="coral",
             model=os.environ.get("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview"),
         ),
     )
 
-    # Pipelined alternative (uncomment + add plugins to requirements.txt):
-    #
-    # from livekit.plugins import deepgram, cartesia, silero
-    # session = AgentSession(
-    #     vad=silero.VAD.load(),
-    #     stt=deepgram.STT(model="nova-3"),
-    #     llm=openai.LLM(model="gpt-4o-mini"),
-    #     tts=cartesia.TTS(model="sonic-2"),
-    # )
-
+    # Transcript collection for /sessions/end (unchanged from prior behavior)
     collected: list[dict] = []
 
     @session.on("conversation_item_added")
@@ -142,20 +112,58 @@ async def entrypoint(ctx: JobContext) -> None:
         if content:
             collected.append({"role": role, "content": content})
 
-    # Distinguish explicit disconnects from network drops:
-    #   CLIENT_INITIATED  → user clicked Disconnect or closed the tab. End
-    #                       the JobContext via ctx.shutdown() so the
-    #                       shutdown callback (which posts /sessions/end)
-    #                       fires immediately. Without this, livekit-agents'
-    #                       built-in close_on_disconnect closes the session
-    #                       but the JobContext sits in the room until
-    #                       empty_timeout (~20s on Cloud default) before
-    #                       firing shutdown callbacks — that was the lag.
-    #   anything else     → likely a network drop. Don't act — let LiveKit's
-    #                       empty_timeout tick down so the user has a chance
-    #                       to reconnect from the same tab. If they don't,
-    #                       the worker tears down naturally and the shutdown
-    #                       callback still fires (just slower).
+    # State-machine orchestration: after each user turn, grade + transition + drive next turn
+    orchestrator_lock = asyncio.Lock()
+
+    async def _orchestrate(user_text: str) -> None:
+        if state.is_done:
+            return
+        concept = state.current_concept
+        if concept is None:
+            return
+
+        try:
+            grade = await grader.grade(concept, user_text)
+            logger.info(
+                "Grade: concept=%s score=%d gaps=%s phase_before=%s",
+                concept.id, grade.score, grade.gaps, state.phase,
+            )
+            state.transition(grade)
+            logger.info("Phase after transition: %s (idx=%d)", state.phase, state.idx)
+        except Exception as e:
+            logger.exception("Orchestration error during grading: %s", e)
+            return
+
+        if state.phase == "done":
+            return
+
+        instruction = state.current_instruction()
+        if not instruction:
+            return
+
+        try:
+            await session.generate_reply(instructions=instruction)
+            if state.phase == "synthesize":
+                state.mark_synthesized()
+        except Exception as e:
+            logger.exception("Failed to push next agent turn: %s", e)
+
+    @session.on("user_input_transcribed")
+    def _on_user_turn(event) -> None:  # type: ignore[no-untyped-def]
+        # Some events fire mid-utterance with is_final=False; skip those.
+        if getattr(event, "is_final", True) is False:
+            return
+        text = (getattr(event, "transcript", "") or "").strip()
+        if not text:
+            return
+        # Schedule async orchestration — the event handler itself must return quickly.
+        asyncio.create_task(_orchestrate_safe(text))
+
+    async def _orchestrate_safe(user_text: str) -> None:
+        async with orchestrator_lock:
+            await _orchestrate(user_text)
+
+    # Disconnect handling — explicit click ends fast; network drops fall through to empty_timeout
     shutdown_started = False
 
     @ctx.room.on("participant_disconnected")
@@ -167,8 +175,7 @@ async def entrypoint(ctx: JobContext) -> None:
         if reason != rtc.DisconnectReason.CLIENT_INITIATED:
             logger.info(
                 "Participant %s dropped (reason=%s) — waiting for empty_timeout",
-                participant.identity,
-                reason,
+                participant.identity, reason,
             )
             return
         shutdown_started = True
@@ -183,7 +190,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(_on_shutdown)
 
-    await session.start(agent=Agent(instructions=instructions), room=ctx.room)
+    # Boot the session, then kick off the first TEACH turn
+    await session.start(agent=Agent(instructions=BASE_INSTRUCTIONS), room=ctx.room)
+    first_instruction = state.current_instruction()
+    if first_instruction:
+        await session.generate_reply(instructions=first_instruction)
 
 
 if __name__ == "__main__":
