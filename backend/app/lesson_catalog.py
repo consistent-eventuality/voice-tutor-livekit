@@ -22,6 +22,16 @@ LESSON_CATALOG: dict[str, dict] = {
             "how HTTP, WebSockets, and WebRTC relate",
         ],
     },
+    "rest_api_design": {
+        "title": "REST API Design",
+        "blurb": "Verbs, status codes, idempotency — anatomy of a well-designed endpoint.",
+        "concept_names": [
+            "HTTP verbs",
+            "HTTP status codes",
+            "idempotency",
+            "how verbs, status codes, and idempotency form a REST endpoint",
+        ],
+    },
 }
 
 

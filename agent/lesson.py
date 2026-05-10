@@ -120,8 +120,69 @@ COMMUNICATION_PROTOCOLS = Lesson(
 )
 
 
+# ---------- REST API Design ----------
+
+
+HTTP_VERBS = Concept(
+    id="HTTP_VERBS",
+    name="HTTP verbs",
+    teach=(
+        "HTTP verbs convey intent: GET reads, POST creates, PUT replaces, "
+        "DELETE removes, PATCH partially updates. Pick the verb that "
+        "matches the operation rather than POSTing everything."
+    ),
+)
+
+
+STATUS_CODES = Concept(
+    id="STATUS_CODES",
+    name="HTTP status codes",
+    teach=(
+        "Status codes signal what happened: 2xx success, 3xx redirect, "
+        "4xx client error, 5xx server error. The meaningful ones are 200 "
+        "OK, 201 Created, 204 No Content, 401 Unauthorized, 403 Forbidden, "
+        "404 Not Found, 422 Unprocessable, and 503 Service Unavailable."
+    ),
+)
+
+
+IDEMPOTENCY = Concept(
+    id="IDEMPOTENCY",
+    name="idempotency",
+    teach=(
+        "An idempotent operation produces the same result no matter how "
+        "many times you call it. GET, PUT, and DELETE are idempotent; "
+        "POST is not. Idempotency makes retries safe, which is critical "
+        "on unreliable networks."
+    ),
+)
+
+
+REST_SYNTHESIS = Concept(
+    id="REST_SYNTHESIS",
+    name="how verbs, status codes, and idempotency form a REST endpoint",
+    teach=(
+        "A well-designed REST endpoint combines all three: pick the verb "
+        "that matches intent, return the right status code (201 on create, "
+        "200 on read, 204 on delete success), and design endpoints to be "
+        "idempotent whenever possible so clients can retry safely under "
+        "network failure."
+    ),
+)
+
+
+REST_API_DESIGN = Lesson(
+    id="rest_api_design",
+    title="REST API Design",
+    blurb="Verbs, status codes, idempotency — anatomy of a well-designed endpoint.",
+    concepts=[HTTP_VERBS, STATUS_CODES, IDEMPOTENCY, REST_SYNTHESIS],
+    closing="Nice work — you've got the building blocks of REST API design. Goodbye for now.",
+)
+
+
 # Registry of available lessons. Add new Lesson definitions to this dict
 # and they'll appear in the catalog automatically.
 LESSONS: dict[str, Lesson] = {
     COMMUNICATION_PROTOCOLS.id: COMMUNICATION_PROTOCOLS,
+    REST_API_DESIGN.id: REST_API_DESIGN,
 }
