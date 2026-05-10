@@ -7,22 +7,34 @@ export interface TokenPayload {
   url: string
   room_name: string
   identity: string
-  lesson_id: number
   session_id: number
+  lesson_id: string
   resuming: boolean
 }
 
-export interface LessonListItem {
-  id: number
-  topic: string
-  created_at: string
-  last_session_at: string
-  session_count: number
+export interface LessonCatalogItem {
+  id: string
+  title: string
+  blurb: string
+  concept_count: number
+}
+
+export interface InProgressSession {
+  session_id: number
+  lesson_id: string
+  lesson_title: string
+  concept_count: number
+  idx: number
+  phase: string
+  current_concept_name: string | null
+  started_at: string
+  last_active_at: string
 }
 
 export async function fetchToken(opts: {
   userId: string
-  lessonId?: number | null
+  lessonId?: string | null
+  sessionId?: number | null
   participantName?: string
 }): Promise<TokenPayload> {
   const res = await fetch(`${API_BASE}/token`, {
@@ -31,6 +43,7 @@ export async function fetchToken(opts: {
     body: JSON.stringify({
       user_id: opts.userId,
       lesson_id: opts.lessonId ?? null,
+      session_id: opts.sessionId ?? null,
       participant_name: opts.participantName ?? null,
     }),
   })
@@ -41,10 +54,18 @@ export async function fetchToken(opts: {
   return res.json()
 }
 
-export async function listLessons(userId: string): Promise<LessonListItem[]> {
-  const res = await fetch(`${API_BASE}/lessons?user_id=${encodeURIComponent(userId)}`)
+export async function listLessonCatalog(): Promise<LessonCatalogItem[]> {
+  const res = await fetch(`${API_BASE}/lessons`)
   if (!res.ok) {
     throw new Error(`Listing lessons failed: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function listInProgressSessions(userId: string): Promise<InProgressSession[]> {
+  const res = await fetch(`${API_BASE}/sessions?user_id=${encodeURIComponent(userId)}`)
+  if (!res.ok) {
+    throw new Error(`Listing sessions failed: ${res.status}`)
   }
   return res.json()
 }

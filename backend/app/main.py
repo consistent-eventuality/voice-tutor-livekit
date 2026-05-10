@@ -7,13 +7,15 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import desc
 from sqlalchemy.orm import Session as ORMSession
 
-from app.db import Lesson, TutorSession, derive_topic, get_db, init_db
+from app.db import Session, UserLesson, get_db, init_db
+from app.lesson_catalog import LESSON_CATALOG, concept_count, current_concept_name
 from app.livekit_token import (
     mint_access_token,
-    new_room_name,
+    new_participant_identity,
+    room_name_for_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,12 +52,90 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# ---------- /lessons (catalog) ----------
+
+
+class LessonCatalogItem(BaseModel):
+    id: str
+    title: str
+    blurb: str
+    concept_count: int
+
+
+@app.get("/lessons", response_model=list[LessonCatalogItem])
+async def list_lessons() -> list[LessonCatalogItem]:
+    """Return the catalog of available lessons. Static — sourced from
+    backend/app/lesson_catalog.py which mirrors the agent's LESSONS dict."""
+    return [
+        LessonCatalogItem(
+            id=lid,
+            title=meta["title"],
+            blurb=meta["blurb"],
+            concept_count=concept_count(lid),
+        )
+        for lid, meta in LESSON_CATALOG.items()
+    ]
+
+
+# ---------- /sessions (in-progress for a user) ----------
+
+
+class InProgressSession(BaseModel):
+    session_id: int
+    lesson_id: str
+    lesson_title: str
+    concept_count: int
+    idx: int
+    phase: str
+    current_concept_name: str | None
+    started_at: datetime
+    last_active_at: datetime
+
+
+@app.get("/sessions", response_model=list[InProgressSession])
+async def list_in_progress_sessions(
+    user_id: str, db: ORMSession = Depends(get_db)
+) -> list[InProgressSession]:
+    """All in-progress (finished_at IS NULL) sessions for a user, ordered
+    most-recent-active first. Each entry becomes a Continue tile in the UI."""
+    rows = (
+        db.query(Session, UserLesson)
+        .join(UserLesson, Session.user_lesson_id == UserLesson.id)
+        .filter(
+            UserLesson.user_id == user_id,
+            Session.finished_at.is_(None),
+        )
+        .order_by(desc(Session.last_active_at))
+        .all()
+    )
+    out = []
+    for sess, ul in rows:
+        meta = LESSON_CATALOG.get(ul.lesson_id, {})
+        state = json.loads(sess.state_json) if sess.state_json else {}
+        idx = int(state.get("idx", 0))
+        out.append(
+            InProgressSession(
+                session_id=sess.id,
+                lesson_id=ul.lesson_id,
+                lesson_title=meta.get("title", ul.lesson_id),
+                concept_count=concept_count(ul.lesson_id),
+                idx=idx,
+                phase=str(state.get("phase", "teach")),
+                current_concept_name=current_concept_name(ul.lesson_id, idx),
+                started_at=sess.started_at,
+                last_active_at=sess.last_active_at,
+            )
+        )
+    return out
+
+
 # ---------- /token ----------
 
 
 class TokenRequest(BaseModel):
     user_id: str
-    lesson_id: int | None = None  # if set, attach a new session to this lesson
+    lesson_id: str | None = None
+    session_id: int | None = None
     participant_name: str | None = None
 
 
@@ -64,42 +144,95 @@ class TokenResponse(BaseModel):
     url: str
     room_name: str
     identity: str
-    lesson_id: int
     session_id: int
+    lesson_id: str
     resuming: bool
 
 
 @app.post("/token", response_model=TokenResponse)
-async def create_token(body: TokenRequest, db: ORMSession = Depends(get_db)) -> TokenResponse:
+async def create_token(
+    body: TokenRequest, db: ORMSession = Depends(get_db)
+) -> TokenResponse:
+    """Mint a LiveKit access token.
+
+    - If `session_id` is provided: resume that specific session. Mint a
+      new room_name (rotated each resume), don't touch state_json.
+    - Otherwise: start fresh. Find or create the UserLesson, insert a new
+      Session under it. Other in-progress sessions for this UserLesson
+      are left alone (multiple concurrent attempts are allowed).
+    """
     if not LIVEKIT_URL:
         raise HTTPException(status_code=503, detail="LIVEKIT_URL not configured")
 
-    if body.lesson_id is not None:
-        lesson = (
-            db.query(Lesson)
-            .filter(Lesson.id == body.lesson_id, Lesson.user_id == body.user_id)
+    if body.session_id is not None:
+        # Resume specific session
+        sess = (
+            db.query(Session)
+            .join(UserLesson, Session.user_lesson_id == UserLesson.id)
+            .filter(
+                Session.id == body.session_id,
+                UserLesson.user_id == body.user_id,
+            )
             .first()
         )
-        if not lesson:
-            raise HTTPException(status_code=404, detail="lesson not found or not owned by user")
+        if not sess:
+            raise HTTPException(
+                status_code=404,
+                detail="session not found or not owned by user",
+            )
+        if sess.finished_at is not None:
+            raise HTTPException(
+                status_code=409, detail="session is already finished"
+            )
+        sess.last_active_at = datetime.utcnow()
+        db.commit()
+        lesson_id = sess.user_lesson.lesson_id
+        session_id = sess.id
         resuming = True
     else:
-        lesson = Lesson(user_id=body.user_id)
-        db.add(lesson)
-        db.flush()  # populate lesson.id
+        # Fresh start (Available tile)
+        if not body.lesson_id:
+            raise HTTPException(
+                status_code=400,
+                detail="lesson_id required when session_id is omitted",
+            )
+        if body.lesson_id not in LESSON_CATALOG:
+            raise HTTPException(
+                status_code=404, detail=f"unknown lesson_id: {body.lesson_id}"
+            )
+
+        ul = (
+            db.query(UserLesson)
+            .filter(
+                UserLesson.user_id == body.user_id,
+                UserLesson.lesson_id == body.lesson_id,
+            )
+            .first()
+        )
+        if ul is None:
+            ul = UserLesson(user_id=body.user_id, lesson_id=body.lesson_id)
+            db.add(ul)
+            db.flush()  # populate ul.id
+
+        new_session = Session(
+            user_lesson_id=ul.id,
+            state_json=json.dumps(
+                {"idx": 0, "phase": "teach", "last_gaps": []}
+            ),
+        )
+        db.add(new_session)
+        db.commit()
+        db.refresh(new_session)
+
+        lesson_id = body.lesson_id
+        session_id = new_session.id
         resuming = False
 
-    room = new_room_name()
-    new_session = TutorSession(lesson_id=lesson.id, room_name=room)
-    db.add(new_session)
-    db.commit()
-    db.refresh(new_session)
-
+    room = room_name_for_session(session_id)
+    identity = body.user_id
     try:
         token = mint_access_token(
-            room_name=room,
-            identity=body.user_id,
-            name=body.participant_name,
+            room_name=room, identity=identity, name=body.participant_name
         )
     except RuntimeError as e:
         logger.error("Token mint failed: %s", e)
@@ -109,143 +242,68 @@ async def create_token(body: TokenRequest, db: ORMSession = Depends(get_db)) -> 
         token=token,
         url=LIVEKIT_URL,
         room_name=room,
-        identity=body.user_id,
-        lesson_id=lesson.id,
-        session_id=new_session.id,
+        identity=identity,
+        session_id=session_id,
+        lesson_id=lesson_id,
         resuming=resuming,
     )
 
 
-# ---------- /lessons (list) ----------
+# ---------- /sessions/{id} (agent reads on dispatch) ----------
 
 
-class LessonListItem(BaseModel):
-    id: int
-    topic: str
-    created_at: datetime
-    last_session_at: datetime
-    session_count: int
-
-
-@app.get("/lessons", response_model=list[LessonListItem])
-async def list_lessons(user_id: str, db: ORMSession = Depends(get_db)) -> list[LessonListItem]:
-    """Lessons that have at least one finished session, newest activity first."""
-    rows = (
-        db.query(
-            Lesson,
-            func.max(TutorSession.started_at).label("last_session_at"),
-            func.count(TutorSession.id).label("session_count"),
-        )
-        .join(TutorSession, TutorSession.lesson_id == Lesson.id)
-        .filter(
-            Lesson.user_id == user_id,
-            TutorSession.ended_at.isnot(None),
-        )
-        .group_by(Lesson.id)
-        .order_by(func.max(TutorSession.started_at).desc())
-        .all()
-    )
-    return [
-        LessonListItem(
-            id=lesson.id,
-            topic=lesson.topic or "Untitled",
-            created_at=lesson.created_at,
-            last_session_at=last_at,
-            session_count=count,
-        )
-        for lesson, last_at, count in rows
-    ]
-
-
-# ---------- /sessions/by-room (agent reads this on dispatch) ----------
-
-
-class SessionByRoomResponse(BaseModel):
+class SessionInfoResponse(BaseModel):
     session_id: int
-    lesson_id: int
-    user_id: str
-    room_name: str
-    resume_transcript: list[dict[str, Any]]  # all prior sibling transcripts concat'd
+    lesson_id: str
+    state_json: dict[str, Any]
 
 
-@app.get("/sessions/by-room/{room_name}", response_model=SessionByRoomResponse)
-async def get_session_by_room(
-    room_name: str, db: ORMSession = Depends(get_db)
-) -> SessionByRoomResponse:
-    session = db.query(TutorSession).filter(TutorSession.room_name == room_name).first()
-    if not session:
+@app.get("/sessions/{session_id}", response_model=SessionInfoResponse)
+async def get_session(
+    session_id: int, db: ORMSession = Depends(get_db)
+) -> SessionInfoResponse:
+    sess = db.query(Session).filter(Session.id == session_id).first()
+    if not sess:
         raise HTTPException(status_code=404, detail="session not found")
-
-    # Concat transcripts from earlier finished sessions in the same lesson
-    siblings = (
-        db.query(TutorSession)
-        .filter(
-            TutorSession.lesson_id == session.lesson_id,
-            TutorSession.id != session.id,
-            TutorSession.ended_at.isnot(None),
-        )
-        .order_by(TutorSession.started_at)
-        .all()
-    )
-    resume_transcript: list[dict[str, Any]] = []
-    for s in siblings:
-        resume_transcript.extend(s.transcript_list())
-
-    return SessionByRoomResponse(
-        session_id=session.id,
-        lesson_id=session.lesson_id,
-        user_id=session.lesson.user_id,
-        room_name=session.room_name,
-        resume_transcript=resume_transcript,
+    state = json.loads(sess.state_json) if sess.state_json else {
+        "idx": 0,
+        "phase": "teach",
+        "last_gaps": [],
+    }
+    return SessionInfoResponse(
+        session_id=sess.id,
+        lesson_id=sess.user_lesson.lesson_id,
+        state_json=state,
     )
 
 
-# ---------- /sessions/end (agent posts this on shutdown) ----------
+# ---------- /sessions/{id}/state (agent posts on every transition) ----------
 
 
-class SessionEndRequest(BaseModel):
-    room_name: str
-    transcript: list[dict[str, Any]]
+class StateUpdateRequest(BaseModel):
+    state_json: dict[str, Any]
 
 
-class SessionEndResponse(BaseModel):
+class StateUpdateResponse(BaseModel):
     status: str
-    session_id: int | None = None
 
 
-@app.post("/sessions/end", response_model=SessionEndResponse)
-async def end_session(body: SessionEndRequest, db: ORMSession = Depends(get_db)) -> SessionEndResponse:
-    session = db.query(TutorSession).filter(TutorSession.room_name == body.room_name).first()
-    if not session:
-        # Orphan room — agent was dispatched to a room whose row isn't in the DB.
-        # Most likely a stale LiveKit room from a previous run, or a fast
-        # double-click that minted two tokens. Best-effort: log and return 200
-        # so the agent's shutdown callback doesn't surface a noisy warning.
-        logger.warning("orphan /sessions/end for room=%s — no DB row, ignoring", body.room_name)
-        return SessionEndResponse(status="orphan")
+@app.post("/sessions/{session_id}/state", response_model=StateUpdateResponse)
+async def update_session_state(
+    session_id: int,
+    body: StateUpdateRequest,
+    db: ORMSession = Depends(get_db),
+) -> StateUpdateResponse:
+    sess = db.query(Session).filter(Session.id == session_id).first()
+    if not sess:
+        # Orphan — might be a stale agent worker against a wiped DB.
+        # Best-effort, don't surface a noisy error to the agent.
+        logger.warning("orphan state update for session_id=%d", session_id)
+        return StateUpdateResponse(status="orphan")
 
-    user_msgs = [
-        m for m in body.transcript
-        if m.get("role") == "user" and (m.get("content") or "").strip()
-    ]
-    if not user_msgs:
-        # Empty session — discard. If this was the only session in the lesson,
-        # drop the lesson too so it doesn't appear as a phantom row.
-        lesson = session.lesson
-        sibling_count = (
-            db.query(TutorSession)
-            .filter(TutorSession.lesson_id == lesson.id, TutorSession.id != session.id)
-            .count()
-        )
-        db.delete(session)
-        if sibling_count == 0:
-            db.delete(lesson)
-        db.commit()
-        return SessionEndResponse(status="discarded")
-
-    session.ended_at = datetime.utcnow()
-    session.transcript = json.dumps(body.transcript)
-    if session.lesson.topic is None:
-        session.lesson.topic = derive_topic(body.transcript)
+    sess.state_json = json.dumps(body.state_json)
+    sess.last_active_at = datetime.utcnow()
+    if body.state_json.get("phase") == "done":
+        sess.finished_at = datetime.utcnow()
     db.commit()
-    return SessionEndResponse(status="ok", session_id=session.id)
+    return StateUpdateResponse(status="ok")

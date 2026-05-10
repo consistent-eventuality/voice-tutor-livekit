@@ -42,10 +42,11 @@ def reteach_text(concept: Concept, gaps: list[str]) -> str:
     )
 
 
-def closing_text() -> str:
+def closing_text(closing: str) -> str:
     """Brief spoken line after the user has passed every concept.
 
     Audibly signals the end of the lesson before the session disconnects.
+    Takes the closing string from the active Lesson rather than a global
+    constant so each lesson can have its own sign-off.
     """
-    from lesson import LESSON_CLOSING
-    return LESSON_CLOSING
+    return closing

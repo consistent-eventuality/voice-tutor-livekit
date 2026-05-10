@@ -10,17 +10,18 @@ import { fetchToken, type TokenPayload } from '../api'
 
 interface VoicePanelProps {
   userId: string
-  lessonId: number | null      // null = start a new lesson
+  lessonId: string | null    // for fresh starts (Available tile)
+  sessionId: number | null   // for resumes (Continue tile)
   onLeave: () => void
 }
 
-export function VoicePanel({ userId, lessonId, onLeave }: VoicePanelProps) {
+export function VoicePanel({ userId, lessonId, sessionId, onLeave }: VoicePanelProps) {
   const [payload, setPayload] = useState<TokenPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    fetchToken({ userId, lessonId })
+    fetchToken({ userId, lessonId, sessionId })
       .then((p) => {
         if (!cancelled) setPayload(p)
       })
@@ -30,7 +31,7 @@ export function VoicePanel({ userId, lessonId, onLeave }: VoicePanelProps) {
     return () => {
       cancelled = true
     }
-  }, [userId, lessonId])
+  }, [userId, lessonId, sessionId])
 
   if (error) {
     return (

@@ -1,21 +1,27 @@
 """LiveKit voice tutor agent worker — state-machine driven, static content.
 
 Per-session orchestration:
-  1. On dispatch, fetch session metadata from /sessions/by-room/{room}.
-  2. Build a LessonState over the lesson's concept list.
-  3. TutorAgent.session.say() the first concept's teach text.
-  4. After each user turn, on_user_turn_completed hook fires BEFORE the
-     agent responds:
-       a. Call externalized grader (gpt-4o-mini, JSON schema) → {score, gaps}.
-       b. state.transition(grade) — Python branch decides next phase.
-       c. session.say(text) for the next phase's curated content.
-  5. On shutdown, POST collected transcript to /sessions/end.
+  1. On dispatch, parse session_id from ctx.room.name (encoded by backend
+     as `tutor-{session_id}-{uuid}`).
+  2. GET /sessions/{session_id} for {lesson_id, state_json}.
+  3. Look up Lesson in agent's LESSONS registry by lesson_id.
+  4. Hydrate LessonState from state_json (or fresh if state is empty).
+  5. Speak the current phase's text via session.say().
+  6. After each user turn, on_user_turn_completed fires:
+       a. Cheat phrase → synthetic pass.
+       b. Otherwise: gpt-4o-mini grader → {score, gaps}.
+       c. state.transition(grade) — Python branch decides next phase.
+       d. POST /sessions/{id}/state with new state_json.
+       e. session.say(text) for the next phase's curated content.
 
-The only LLM call in the per-turn loop is the grader. The agent's own
-voice output goes through `session.say()` which bypasses the LLM entirely
-— teach/reteach/synthesis content is read verbatim from `lesson.py` /
-`prompts.py`. AgentSession's LLM is required by the framework but never
-invoked for content generation.
+Per-transition state save lets the user disconnect mid-lesson (clean OR
+crash) and resume from the same concept on a different attempt.
+
+The only LLM call in the per-turn loop is the grader. All agent voice
+output goes through session.say() which bypasses the LLM and feeds TTS
+directly. AgentSession's LLM is required by the framework but never
+invoked for content generation; StopResponse on every hook exit suppresses
+the framework's auto-reply.
 
 Required env: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY
 Optional env: API_BASE_URL (default http://api:8000), GRADER_MODEL
@@ -34,7 +40,7 @@ from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.plugins import openai as lk_openai, silero
 
 import prompts
-from lesson import LESSON
+from lesson import LESSONS, Lesson
 from grader import Grader
 from state_machine import Grade, LessonState
 
@@ -57,20 +63,50 @@ def _is_cheat_phrase(user_text: str) -> bool:
     return cleaned == CHEAT_PHRASE
 
 
+def _parse_session_id_from_room(room_name: str) -> int | None:
+    """Extract session id from room name minted as `tutor-{id}-{uuid}`."""
+    parts = room_name.split("-")
+    if len(parts) >= 3 and parts[0] == "tutor":
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
+    return None
+
+
 class TutorAgent(Agent):
     """Agent that runs the structured loop. Hook fires before each agent reply."""
 
-    def __init__(self, state: LessonState, grader: Grader) -> None:
-        # Minimal persistent system prompt — content comes from session.say()
-        # in our hook, not from the LLM, so this prompt is essentially unused.
+    def __init__(
+        self,
+        state: LessonState,
+        lesson: Lesson,
+        grader: Grader,
+        session_id: int,
+    ) -> None:
+        # Persistent system prompt is unused — content goes through
+        # session.say() and we suppress auto-reply via StopResponse.
         super().__init__(
             instructions=(
-                "You are a voice tutor for HTTP, WebSockets, and WebRTC. "
-                "Speak only when explicitly told to."
+                "You are a voice tutor. Speak only when explicitly told to."
             )
         )
         self._state = state
+        self._lesson = lesson
         self._grader = grader
+        self._session_id = session_id
+
+    async def _save_state(self) -> None:
+        """Persist the current LessonState to the backend so a future
+        resume can pick up here. Called after every transition."""
+        try:
+            async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=5.0) as http:
+                await http.post(
+                    f"/sessions/{self._session_id}/state",
+                    json={"state_json": self._state.to_dict()},
+                )
+        except Exception as e:
+            logger.warning("Failed to save state: %s", e)
 
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
@@ -90,9 +126,7 @@ class TutorAgent(Agent):
         if concept is None:
             raise StopResponse()
 
-        # Cheat-code path: skip the grader, force-pass. Lets the developer
-        # walk through a full lesson quickly during testing/demos without
-        # giving real answers. Logged distinctly so it's obvious in tails.
+        # Cheat-code path: skip the grader, force-pass.
         if _is_cheat_phrase(user_text):
             logger.info(
                 "[CHEAT] phrase=%r — synthetic pass for concept=%s phase_before=%s",
@@ -119,45 +153,44 @@ class TutorAgent(Agent):
                 logger.exception("Grading failed: %s", e)
                 raise StopResponse()
 
+        # Persist state after every transition (resumption).
+        await self._save_state()
+
         # Dispatch to the next spoken text based on the new phase.
         if self._state.phase == "teach":
             assert self._state.current_concept is not None
             text = prompts.teach_text(self._state.current_concept)
             # Acknowledge the user before the next concept's teach. idx > 0
             # means we just advanced from a prior concept (vs. the boot
-            # turn, which is dispatched from entrypoint with idx=0 and
-            # doesn't hit this code path).
+            # turn, dispatched from entrypoint with idx=0).
             if self._state.idx > 0:
                 text = "Great job! " + text
         elif self._state.phase == "reteach":
             assert self._state.current_concept is not None
-            # Reteach text already has its own lead-in ("Let me walk
-            # through that one more time"), so no extra acknowledgment.
+            # Reteach text already has its own lead-in.
             text = prompts.reteach_text(
                 self._state.current_concept, self._state.last_gaps,
             )
         elif self._state.phase == "done":
-            # User just passed the last concept. The closing line already
-            # starts with "Great work — you've completed the lesson," so
-            # no extra acknowledgment.
-            text = prompts.closing_text()
+            # User just passed the last concept. Closing line already
+            # starts with "Great work — you've completed the lesson."
+            text = prompts.closing_text(self._lesson.closing)
         else:
             raise StopResponse()
 
         await self.session.say(text)
-        # Suppress the framework's auto-reply. Without this, after our
-        # session.say() returns the framework calls generate_reply() and
-        # the LLM produces an additional unscripted utterance — the
-        # rambling we observed after the closing line. All agent speech
-        # in this app is curated and routed through session.say(); the
-        # auto-reply is an unintended second mouth.
+        # Suppress the framework's auto-reply — see module docstring.
         raise StopResponse()
 
 
-async def _fetch_session_info(room_name: str) -> dict:
+async def _fetch_session_info(session_id: int) -> dict:
+    """GET /sessions/{id} → {session_id, lesson_id, state_json}.
+
+    Returns {} on failure so the agent can fall back to a default state.
+    """
     try:
         async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=5.0) as http:
-            res = await http.get(f"/sessions/by-room/{room_name}")
+            res = await http.get(f"/sessions/{session_id}")
             res.raise_for_status()
             return res.json()
     except Exception as e:
@@ -165,36 +198,42 @@ async def _fetch_session_info(room_name: str) -> dict:
         return {}
 
 
-async def _post_session_end(room_name: str, transcript: list[dict]) -> None:
-    if not transcript:
-        logger.info("No transcript to persist for room %s", room_name)
-        return
-    try:
-        async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=10.0) as http:
-            res = await http.post(
-                "/sessions/end",
-                json={"room_name": room_name, "transcript": transcript},
-            )
-            res.raise_for_status()
-            logger.info("Persisted session for room %s: %s", room_name, res.json())
-    except Exception as e:
-        logger.warning("Failed to persist session end: %s", e)
-
-
 async def entrypoint(ctx: JobContext) -> None:
     logger.info("Agent dispatched to room: %s", ctx.room.name)
     await ctx.connect()
 
-    await _fetch_session_info(ctx.room.name)
+    session_id = _parse_session_id_from_room(ctx.room.name)
+    if session_id is None:
+        logger.error(
+            "Could not parse session_id from room name %r — aborting",
+            ctx.room.name,
+        )
+        return
 
-    state = LessonState(lesson=LESSON)
+    info = await _fetch_session_info(session_id)
+    lesson_id = info.get("lesson_id")
+    state_data = info.get("state_json") or {}
+
+    if not lesson_id or lesson_id not in LESSONS:
+        logger.error(
+            "Unknown or missing lesson_id %r for session %d — aborting",
+            lesson_id, session_id,
+        )
+        return
+
+    lesson = LESSONS[lesson_id]
+    state = LessonState.from_dict(lesson.concepts, state_data)
+    logger.info(
+        "Hydrated session %d: lesson=%s phase=%s idx=%d",
+        session_id, lesson_id, state.phase, state.idx,
+    )
+
     grader = Grader()
-    agent = TutorAgent(state, grader)
+    agent = TutorAgent(state, lesson, grader, session_id)
 
-    # Pipelined STT + LLM + TTS (all OpenAI, plus Silero for VAD). The LLM
-    # here is required by the framework but is never invoked via
-    # generate_reply — all of the agent's spoken content goes through
-    # session.say() which bypasses the LLM and feeds TTS directly.
+    # Pipelined STT + LLM + TTS. The LLM is required by the framework
+    # but never invoked via generate_reply — all agent speech goes
+    # through session.say().
     session = AgentSession(
         vad=silero.VAD.load(),
         stt=lk_openai.STT(model="whisper-1"),
@@ -202,24 +241,6 @@ async def entrypoint(ctx: JobContext) -> None:
         tts=lk_openai.TTS(voice="coral"),
     )
 
-    # Transcript collection for /sessions/end
-    collected: list[dict] = []
-
-    @session.on("conversation_item_added")
-    def _on_item(event) -> None:  # type: ignore[no-untyped-def]
-        item = event.item
-        role = getattr(item, "role", None)
-        if role not in ("user", "assistant"):
-            return
-        content = getattr(item, "text_content", None)
-        if content is None and hasattr(item, "content"):
-            raw = item.content
-            content = raw if isinstance(raw, str) else " ".join(str(c) for c in raw)
-        content = (content or "").strip()
-        if content:
-            collected.append({"role": role, "content": content})
-
-    # Disconnect handling — explicit click ends fast; network drops fall through
     shutdown_started = False
 
     @ctx.room.on("participant_disconnected")
@@ -242,11 +263,6 @@ async def entrypoint(ctx: JobContext) -> None:
         ctx.shutdown(reason="user_disconnected")
 
     # End the lesson when the closing line finishes speaking.
-    # state.is_done flips to True the moment the user passes the last
-    # concept; the hook then triggers the closing line via session.say().
-    # The agent transitions listening→thinking→speaking→listening to
-    # utter the closing; we must wait for the final speaking→non-speaking
-    # edge before shutting down, otherwise we'd cut off the audio.
     @session.on("agent_state_changed")
     def _on_agent_state(event) -> None:  # type: ignore[no-untyped-def]
         nonlocal shutdown_started
@@ -262,15 +278,21 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             ctx.shutdown(reason="lesson_complete")
 
-    async def _on_shutdown() -> None:
-        await _post_session_end(ctx.room.name, collected)
-
-    ctx.add_shutdown_callback(_on_shutdown)
-
     await session.start(agent=agent, room=ctx.room)
-    # Kick off the first TEACH turn — read the curated content directly via TTS.
-    assert state.current_concept is not None
-    await session.say(prompts.teach_text(state.current_concept))
+
+    # Boot turn — read the current phase's spoken text. On a fresh start
+    # this is the first concept's teach. On a resume this is whatever
+    # phase the user was in (teach/reteach/done).
+    if state.phase == "teach":
+        assert state.current_concept is not None
+        await session.say(prompts.teach_text(state.current_concept))
+    elif state.phase == "reteach":
+        assert state.current_concept is not None
+        await session.say(prompts.reteach_text(state.current_concept, state.last_gaps))
+    elif state.phase == "done":
+        # User resumed an already-completed session — speak the closing
+        # and let the agent_state_changed handler shut down.
+        await session.say(prompts.closing_text(lesson.closing))
 
 
 if __name__ == "__main__":

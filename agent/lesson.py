@@ -98,12 +98,30 @@ SYNTHESIS = Concept(
 )
 
 
-LESSON: list[Concept] = [HTTP_BASICS, WEBSOCKETS, WEBRTC, SYNTHESIS]
+@dataclass(frozen=True)
+class Lesson:
+    """A unit of curriculum: ordered concepts plus user-facing metadata."""
+    id: str
+    title: str
+    blurb: str          # one-line description for the catalog tile
+    concepts: list[Concept]
+    closing: str        # spoken when the user passes the last concept
 
 
-# Spoken when the user passes the last concept — audible signal that the
-# lesson is over before the session disconnects (silence-then-disconnect
-# feels jarring).
-LESSON_CLOSING = (
-    "Great work — you've completed the lesson. Goodbye for now."
+COMMUNICATION_PROTOCOLS = Lesson(
+    id="communication_protocols",
+    title="Communication Protocols",
+    blurb="HTTP, WebSockets, WebRTC — when to use each.",
+    concepts=[HTTP_BASICS, WEBSOCKETS, WEBRTC, SYNTHESIS],
+    # Spoken when the user passes the last concept — audible signal that
+    # the lesson is over before the session disconnects (silence-then-
+    # disconnect feels jarring).
+    closing="Great work — you've completed the lesson. Goodbye for now.",
 )
+
+
+# Registry of available lessons. Add new Lesson definitions to this dict
+# and they'll appear in the catalog automatically.
+LESSONS: dict[str, Lesson] = {
+    COMMUNICATION_PROTOCOLS.id: COMMUNICATION_PROTOCOLS,
+}

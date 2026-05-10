@@ -1,23 +1,31 @@
 import { useEffect, useState } from 'react'
-import { listLessons, type LessonListItem } from '../api'
+import {
+  listInProgressSessions,
+  listLessonCatalog,
+  type InProgressSession,
+  type LessonCatalogItem,
+} from '../api'
 import { timeAgo } from '../utils/time'
 
 interface HomeProps {
   userId: string
-  onStartNew: () => void
-  onResume: (lessonId: number) => void
+  onStartLesson: (lessonId: string) => void
+  onResumeSession: (sessionId: number) => void
 }
 
-export function Home({ userId, onStartNew, onResume }: HomeProps) {
-  const [lessons, setLessons] = useState<LessonListItem[]>([])
+export function Home({ userId, onStartLesson, onResumeSession }: HomeProps) {
+  const [catalog, setCatalog] = useState<LessonCatalogItem[]>([])
+  const [sessions, setSessions] = useState<InProgressSession[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    listLessons(userId)
-      .then((items) => {
-        if (!cancelled) setLessons(items)
+    Promise.all([listLessonCatalog(), listInProgressSessions(userId)])
+      .then(([cat, sess]) => {
+        if (cancelled) return
+        setCatalog(cat)
+        setSessions(sess)
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
@@ -30,48 +38,88 @@ export function Home({ userId, onStartNew, onResume }: HomeProps) {
     }
   }, [userId])
 
+  if (loading) {
+    return (
+      <div className="rounded-xl bg-[color:var(--color-surface)] p-8 text-center">
+        <p className="text-sm text-[color:var(--color-muted)]">Loading…</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-xl bg-[color:var(--color-surface)] p-8 text-center">
+        <p className="text-sm text-red-400 break-words">{error}</p>
+      </div>
+    )
+  }
+
   return (
-    <div className="rounded-xl bg-[color:var(--color-surface)] p-8">
-      <button
-        onClick={onStartNew}
-        className="w-full px-6 py-3 rounded-lg bg-[color:var(--color-accent)] text-white font-medium"
-      >
-        Start new lesson
-      </button>
-
-      {error && (
-        <p className="mt-4 text-sm text-red-400 break-words">{error}</p>
-      )}
-
-      {lessons.length > 0 && (
-        <>
-          <h2 className="mt-8 mb-3 text-xs uppercase tracking-wider text-[color:var(--color-muted)]">
-            Past lessons
+    <div className="flex flex-col gap-6">
+      {sessions.length > 0 && (
+        <section>
+          <h2 className="mb-3 text-xs uppercase tracking-wider text-[color:var(--color-muted)]">
+            Continue where you left off
           </h2>
           <ul className="flex flex-col gap-2">
-            {lessons.map((lesson) => (
-              <li key={lesson.id}>
+            {sessions.map((s) => (
+              <li key={s.session_id}>
                 <button
-                  onClick={() => onResume(lesson.id)}
+                  onClick={() => onResumeSession(s.session_id)}
                   className="w-full text-left px-4 py-3 rounded-lg border border-white/10 hover:border-[color:var(--color-accent)] hover:bg-white/5 transition"
                 >
-                  <span className="text-[color:var(--color-muted)]">
-                    {timeAgo(lesson.last_session_at)}
-                  </span>
-                  <span className="text-[color:var(--color-muted)] mx-2">·</span>
-                  <span>{lesson.topic}</span>
+                  <div className="font-medium">{s.lesson_title}</div>
+                  <div className="text-xs text-[color:var(--color-muted)] mt-1">
+                    {s.current_concept_name
+                      ? `On ${s.current_concept_name} · ${s.idx + 1} of ${s.concept_count}`
+                      : 'Completed'}{' '}
+                    · {phaseLabel(s.phase)} · {timeAgo(s.last_active_at)}
+                  </div>
                 </button>
               </li>
             ))}
           </ul>
-        </>
+        </section>
       )}
 
-      {!loading && lessons.length === 0 && !error && (
-        <p className="mt-8 text-center text-xs text-[color:var(--color-muted)]">
-          No past lessons yet.
-        </p>
-      )}
+      <section>
+        <h2 className="mb-3 text-xs uppercase tracking-wider text-[color:var(--color-muted)]">
+          Available lessons
+        </h2>
+        <ul className="flex flex-col gap-2">
+          {catalog.map((lesson) => (
+            <li key={lesson.id}>
+              <button
+                onClick={() => onStartLesson(lesson.id)}
+                className="w-full text-left px-4 py-3 rounded-lg border border-white/10 hover:border-[color:var(--color-accent)] hover:bg-white/5 transition"
+              >
+                <div className="font-medium">{lesson.title}</div>
+                <div className="text-xs text-[color:var(--color-muted)] mt-1">
+                  {lesson.blurb}
+                </div>
+              </button>
+            </li>
+          ))}
+        </ul>
+        {catalog.length === 0 && (
+          <p className="text-center text-xs text-[color:var(--color-muted)]">
+            No lessons available.
+          </p>
+        )}
+      </section>
     </div>
   )
+}
+
+function phaseLabel(phase: string): string {
+  switch (phase) {
+    case 'teach':
+      return 'in progress'
+    case 'reteach':
+      return 'reteaching'
+    case 'done':
+      return 'completed'
+    default:
+      return phase
+  }
 }

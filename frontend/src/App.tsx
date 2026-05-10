@@ -5,7 +5,7 @@ import { useUserId } from './hooks/useUserId'
 
 type View =
   | { kind: 'home' }
-  | { kind: 'session'; lessonId: number | null }
+  | { kind: 'session'; lessonId: string | null; sessionId: number | null }
 
 export function App() {
   const userId = useUserId()
@@ -24,13 +24,18 @@ export function App() {
         {view.kind === 'home' ? (
           <Home
             userId={userId}
-            onStartNew={() => setView({ kind: 'session', lessonId: null })}
-            onResume={(lessonId) => setView({ kind: 'session', lessonId })}
+            onStartLesson={(lessonId) =>
+              setView({ kind: 'session', lessonId, sessionId: null })
+            }
+            onResumeSession={(sessionId) =>
+              setView({ kind: 'session', lessonId: null, sessionId })
+            }
           />
         ) : (
           <VoicePanel
             userId={userId}
             lessonId={view.lessonId}
+            sessionId={view.sessionId}
             onLeave={() => setView({ kind: 'home' })}
           />
         )}

@@ -81,3 +81,38 @@ class LessonState:
         else:
             self.phase = "teach"
             self.last_gaps = []
+
+    # --- serialization for per-transition persistence ---
+
+    def to_dict(self) -> dict:
+        return {
+            "idx": self.idx,
+            "phase": self.phase,
+            "last_gaps": list(self.last_gaps),
+        }
+
+    @classmethod
+    def from_dict(cls, lesson: list[Concept], data: dict) -> "LessonState":
+        """Reconstruct a state from a previously serialized dict.
+
+        Defensive against missing/extra keys — falls back to a fresh state
+        if anything looks wrong, so a corrupt state_json never blocks a
+        user from using a lesson.
+        """
+        state = cls(lesson)
+        try:
+            state.idx = int(data.get("idx", 0))
+            phase = data.get("phase", "teach")
+            if phase not in ("teach", "reteach", "done"):
+                phase = "teach"
+            state.phase = phase
+            gaps = data.get("last_gaps", [])
+            state.last_gaps = list(gaps) if isinstance(gaps, list) else []
+            # Clamp idx within bounds
+            if state.idx < 0 or state.idx > len(lesson):
+                state.idx = 0
+                state.phase = "teach"
+                state.last_gaps = []
+        except (TypeError, ValueError):
+            state = cls(lesson)
+        return state
