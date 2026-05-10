@@ -42,11 +42,10 @@ logging.basicConfig(level=logging.INFO)
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8000")
 
-BASE_INSTRUCTIONS = (
-    "You are a structured voice tutor. Always respond in English. "
-    "You only do exactly what each turn's instructions tell you. "
-    "Keep turns short (1-3 sentences). End every turn cleanly — don't run on."
-)
+# NOTE: We do NOT use a static system prompt. The persistent system prompt
+# is rewritten at every phase boundary via agent.update_instructions(...) so
+# the realtime model always sees exactly one focused job — the current
+# phase's prompt. The first phase's instructions seed the Agent on init.
 
 
 async def _fetch_session_info(room_name: str) -> dict:
@@ -95,6 +94,12 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
+    # The agent's persistent system prompt always equals the current phase's
+    # focused prompt. We mutate it at every phase boundary via
+    # agent.update_instructions(...) so the realtime model has exactly one
+    # source of truth at any moment — defeats its training-prior drift.
+    agent = Agent(instructions=state.current_instruction())
+
     # Transcript collection for /sessions/end (unchanged from prior behavior)
     collected: list[dict] = []
 
@@ -142,7 +147,12 @@ async def entrypoint(ctx: JobContext) -> None:
             return
 
         try:
-            await session.generate_reply(instructions=instruction)
+            # Replace the persistent system prompt with the new phase's
+            # focused instruction, THEN ask the model to generate a reply.
+            # update_instructions is authoritative; generate_reply(instructions=)
+            # alone gets ignored / merged with priors.
+            await agent.update_instructions(instruction)
+            await session.generate_reply()
             if state.phase == "synthesize":
                 state.mark_synthesized()
         except Exception as e:
@@ -190,11 +200,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(_on_shutdown)
 
-    # Boot the session, then kick off the first TEACH turn
-    await session.start(agent=Agent(instructions=BASE_INSTRUCTIONS), room=ctx.room)
-    first_instruction = state.current_instruction()
-    if first_instruction:
-        await session.generate_reply(instructions=first_instruction)
+    # Boot the session — agent already initialized with first phase's prompt
+    await session.start(agent=agent, room=ctx.room)
+    # Kick off the first TEACH turn (system prompt is already correct)
+    await session.generate_reply()
 
 
 if __name__ == "__main__":
