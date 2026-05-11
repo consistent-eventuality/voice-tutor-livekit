@@ -112,17 +112,10 @@ INFO:voice-tutor-agent:Phase after transition: teach (idx=1)
 
 ## Out of scope
 
-Parked across product and engineering — each is a clear next step:
-
-**Product / content**
-
 - **Polished frontend.** The frontend was AI-generated end-to-end so engineering effort could concentrate on the loop machinery.
 - **Clarify phase.** A voice tutor should let the user ask questions. A `clarify` phase + a separate `Clarifier` LLM call slots into the state machine alongside `teach` / `reteach`.
 - **Speech-skill detection and coaching.** Pronunciation, accent, words per minute, speaking style. Not in scope here; possible against the same STT stream.
 - **Curriculum content quality and breadth.** Two very basic "lessons" with static content. Quality of the teaching content is a non goal. 
-
-**Engineering**
-
 - **Prompt tuning.** Production would A/B against transcripts to tune wording, the grading threshold, and reteach behavior.
 - **Tailored reteach via LLM.** Reteach currently re-reads the same teach text with a brief lead-in. The future version uses a `Reteacher` LLM call that takes `(concept, gaps_from_grader)` and produces a 2–3 sentence explanation tailored to the user's specific misunderstanding. `state.last_gaps` is already populated; this is a one-function add.
 - **Persisting grades.** `Grade` flows through Python in-session but isn't written to DB. A per-(session, concept) grades table unlocks analytics and cross-session adaptation.
