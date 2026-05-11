@@ -119,7 +119,7 @@ Parked across product and engineering — each is a clear next step:
 - **Polished frontend.** The frontend was AI-generated end-to-end so engineering effort could concentrate on the loop machinery.
 - **Clarify phase.** A voice tutor should let the user ask questions. A `clarify` phase + a separate `Clarifier` LLM call slots into the state machine alongside `teach` / `reteach`.
 - **Speech-skill detection and coaching.** Pronunciation, accent, words per minute, speaking style. Not in scope here; possible against the same STT stream.
-- **Curriculum content quality and breadth.** Two fixture lessons. Production wants many more, expert-written, editorially reviewed.
+- **Curriculum content quality and breadth.** Two very basic "lessons" with static content. Quality of the teaching content is a non goal. 
 
 **Engineering**
 
