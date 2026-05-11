@@ -18,10 +18,36 @@ surfaces gaps that silent reading doesn't. The framework extends to any
 subject that fits voice AI well; the loop machinery is the part that
 generalizes.
 
+### Bonus features delivered
+
+- **Session resumability.** Every state transition is persisted via
+  `PUT /sessions/{id}/state`. Disconnect mid-lesson and the session shows
+  up under **Resume in progress** on the home screen — click it and a new
+  agent worker hydrates from the DB at exactly the concept you were on.
+- **Connection-drop recovery.** Same mechanism. A network blip, browser
+  refresh, or even a worker crash is recoverable: the user's worst-case
+  loss is the in-flight turn.
+
+### Post-session summary — how I'd build it
+
+Not built, but here's the shape. The brief's "key topics + suggested
+follow-ups" wants two inputs the agent already produces:
+
+1. **Transcript** — capture every `session.say(...)` and
+   `on_user_turn_completed(text)` into a `transcript_json` column on
+   `sessions`, written per turn alongside `state_json`.
+2. **Gaps** — accumulate per-concept gaps from the grader's existing
+   `Grade(score, gaps)` output into `state_json.gaps_by_concept`
+   (no schema change).
+
+On `phase == "done"`, one LLM call with both inputs and a strict
+`response_format` JSON schema produces `{covered, struggled, next_focus}`.
+Persist to a `summary_json` column. Surface on Home → Recently completed.
+
 ## Curriculum, Lesson and Concept
 
 ```
-Curriculum  =  DAG of Lessons (Out of scopt)
+Curriculum  =  DAG of Lessons (Out of scope)
 Lesson      =  ordered list of Concepts + metadata (built 2 lessons)
 Concept     =  the loop primitive (TEACH → GRADE → RETEACH?)   
 ```
