@@ -12,10 +12,17 @@ interface VoicePanelProps {
   userId: string
   lessonId: string | null    // for fresh starts (Available tile)
   sessionId: number | null   // for resumes (Continue tile)
+  lessonTitle: string        // for display in the voice panel header
   onLeave: () => void
 }
 
-export function VoicePanel({ userId, lessonId, sessionId, onLeave }: VoicePanelProps) {
+export function VoicePanel({
+  userId,
+  lessonId,
+  sessionId,
+  lessonTitle,
+  onLeave,
+}: VoicePanelProps) {
   const [payload, setPayload] = useState<TokenPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -66,21 +73,32 @@ export function VoicePanel({ userId, lessonId, sessionId, onLeave }: VoicePanelP
       className="rounded-xl bg-[color:var(--color-surface)] p-6"
     >
       <RoomAudioRenderer />
-      <ActiveSession resuming={payload.resuming} />
+      <ActiveSession lessonTitle={lessonTitle} resuming={payload.resuming} />
     </LiveKitRoom>
   )
 }
 
-function ActiveSession({ resuming }: { resuming: boolean }) {
+function ActiveSession({
+  lessonTitle,
+  resuming,
+}: {
+  lessonTitle: string
+  resuming: boolean
+}) {
   const { state, audioTrack } = useVoiceAssistant()
 
   return (
     <div className="flex flex-col items-center gap-6">
-      {resuming && (
-        <p className="text-xs text-[color:var(--color-muted)]">
-          Resuming previous lesson…
-        </p>
-      )}
+      <div className="text-center">
+        <div className="text-sm font-semibold text-[color:var(--color-text)]">
+          {lessonTitle}
+        </div>
+        {resuming && (
+          <div className="text-xs text-[color:var(--color-muted)] mt-1">
+            Resuming…
+          </div>
+        )}
+      </div>
       <div className="h-32 w-full flex items-center justify-center">
         <BarVisualizer
           state={state}

@@ -9,8 +9,8 @@ import { timeAgo } from '../utils/time'
 
 interface HomeProps {
   userId: string
-  onStartLesson: (lessonId: string) => void
-  onResumeSession: (sessionId: number) => void
+  onStartLesson: (lessonId: string, lessonTitle: string) => void
+  onResumeSession: (sessionId: number, lessonTitle: string) => void
 }
 
 export function Home({ userId, onStartLesson, onResumeSession }: HomeProps) {
@@ -65,7 +65,7 @@ export function Home({ userId, onStartLesson, onResumeSession }: HomeProps) {
           {catalog.map((lesson) => (
             <li key={lesson.id}>
               <button
-                onClick={() => onStartLesson(lesson.id)}
+                onClick={() => onStartLesson(lesson.id, lesson.title)}
                 className="group w-full text-left px-5 py-4 rounded-xl border-2 border-[color:var(--color-accent)]/40 bg-[color:var(--color-accent)]/5 hover:border-[color:var(--color-accent)] hover:bg-[color:var(--color-accent)]/15 transition"
               >
                 <div className="flex items-start justify-between gap-3">
@@ -105,7 +105,7 @@ export function Home({ userId, onStartLesson, onResumeSession }: HomeProps) {
             {sessions.map((s) => (
               <li key={s.session_id}>
                 <button
-                  onClick={() => onResumeSession(s.session_id)}
+                  onClick={() => onResumeSession(s.session_id, s.lesson_title)}
                   className="w-full text-left px-3 py-2 rounded-md hover:bg-white/5 transition flex items-baseline justify-between gap-3"
                 >
                   <span className="text-sm">
