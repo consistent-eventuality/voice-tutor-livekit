@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import desc
 from sqlalchemy.orm import Session as ORMSession
 
-from app.db import Session, UserLesson, get_db, init_db
+from app.db import Session, get_db, init_db
 from app.lesson_catalog import LESSON_CATALOG, concept_count, current_concept_name
 from app.livekit_token import (
     mint_access_token,
@@ -99,29 +99,28 @@ async def list_in_progress_sessions(
     """All in-progress (finished_at IS NULL) sessions for a user, ordered
     most-recent-active first. Each entry becomes a Continue tile in the UI."""
     rows = (
-        db.query(Session, UserLesson)
-        .join(UserLesson, Session.user_lesson_id == UserLesson.id)
+        db.query(Session)
         .filter(
-            UserLesson.user_id == user_id,
+            Session.user_id == user_id,
             Session.finished_at.is_(None),
         )
         .order_by(desc(Session.last_active_at))
         .all()
     )
     out = []
-    for sess, ul in rows:
-        meta = LESSON_CATALOG.get(ul.lesson_id, {})
+    for sess in rows:
+        meta = LESSON_CATALOG.get(sess.lesson_id, {})
         state = json.loads(sess.state_json) if sess.state_json else {}
         idx = int(state.get("idx", 0))
         out.append(
             InProgressSession(
                 session_id=sess.id,
-                lesson_id=ul.lesson_id,
-                lesson_title=meta.get("title", ul.lesson_id),
-                concept_count=concept_count(ul.lesson_id),
+                lesson_id=sess.lesson_id,
+                lesson_title=meta.get("title", sess.lesson_id),
+                concept_count=concept_count(sess.lesson_id),
                 idx=idx,
                 phase=str(state.get("phase", "teach")),
-                current_concept_name=current_concept_name(ul.lesson_id, idx),
+                current_concept_name=current_concept_name(sess.lesson_id, idx),
                 started_at=sess.started_at,
                 last_active_at=sess.last_active_at,
             )
@@ -153,12 +152,12 @@ class SessionResponse(BaseModel):
 async def create_or_resume_session(
     body: SessionRequest, db: ORMSession = Depends(get_db)
 ) -> SessionResponse:
-    """Mint a LiveKit access token.
+    """Create or resume a Session and return a LiveKit access token.
 
     - If `session_id` is provided: resume that specific session. Mint a
       new room_name (rotated each resume), don't touch state_json.
-    - Otherwise: start fresh. Find or create the UserLesson, insert a new
-      Session under it. Other in-progress sessions for this UserLesson
+    - Otherwise: start fresh. Insert a new Session with the given
+      lesson_id. Other in-progress sessions for the same (user, lesson)
       are left alone (multiple concurrent attempts are allowed).
     """
     if not LIVEKIT_URL:
@@ -168,10 +167,9 @@ async def create_or_resume_session(
         # Resume specific session
         sess = (
             db.query(Session)
-            .join(UserLesson, Session.user_lesson_id == UserLesson.id)
             .filter(
                 Session.id == body.session_id,
-                UserLesson.user_id == body.user_id,
+                Session.user_id == body.user_id,
             )
             .first()
         )
@@ -186,7 +184,7 @@ async def create_or_resume_session(
             )
         sess.last_active_at = datetime.utcnow()
         db.commit()
-        lesson_id = sess.user_lesson.lesson_id
+        lesson_id = sess.lesson_id
         session_id = sess.id
         resuming = True
     else:
@@ -201,21 +199,9 @@ async def create_or_resume_session(
                 status_code=404, detail=f"unknown lesson_id: {body.lesson_id}"
             )
 
-        ul = (
-            db.query(UserLesson)
-            .filter(
-                UserLesson.user_id == body.user_id,
-                UserLesson.lesson_id == body.lesson_id,
-            )
-            .first()
-        )
-        if ul is None:
-            ul = UserLesson(user_id=body.user_id, lesson_id=body.lesson_id)
-            db.add(ul)
-            db.flush()  # populate ul.id
-
         new_session = Session(
-            user_lesson_id=ul.id,
+            user_id=body.user_id,
+            lesson_id=body.lesson_id,
             state_json=json.dumps(
                 {"idx": 0, "phase": "teach", "last_gaps": []}
             ),
@@ -272,7 +258,7 @@ async def get_session(
     }
     return SessionInfoResponse(
         session_id=sess.id,
-        lesson_id=sess.user_lesson.lesson_id,
+        lesson_id=sess.lesson_id,
         state_json=state,
     )
 

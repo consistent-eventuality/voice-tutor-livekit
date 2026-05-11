@@ -131,7 +131,7 @@ The five agent files that implement this:
 
 ```
 ┌─────────┐ POST /sessions ┌──────────────────┐
-│ Browser │───────────────▶│ FastAPI (api)    │  user_lessons + sessions
+│ Browser │───────────────▶│ FastAPI (api)    │  sessions + state_json
 │ (React) │◀───────────────│ port 8000        │  state_json (resumption)
 └────┬────┘                └──────────────────┘
      │                              ▲
@@ -157,7 +157,7 @@ The five agent files that implement this:
 Three services, each with one job:
 
 - **`backend/`** (FastAPI + SQLite) mints LiveKit access tokens, persists
-  user_lessons + sessions + state_json, serves the agent's lookup endpoint.
+  sessions + state_json, serves the agent's lookup endpoint.
 - **`agent/`** (livekit-agents worker) is a long-lived process registered with
   LiveKit Cloud. On dispatch it parses the session_id from the room name,
   fetches state from the API, hydrates the state machine, and walks the
@@ -180,25 +180,27 @@ WebRTC sessions.
 | `GET` | `/sessions/{id}` | Agent's lookup on dispatch. Returns `{lesson_id, state_json}`. |
 | `PUT` | `/sessions/{id}/state` | Agent PUTs after every state transition. Body: `{state_json}`. Idempotent — replays of the same state are safe. When `state_json.phase == "done"` the backend also sets `finished_at`. |
 
-### Persistence (UserLesson + Session)
+### Persistence (Session only)
 
 ```python
-class UserLesson:
-    id, user_id, lesson_id, created_at
-    UniqueConstraint(user_id, lesson_id)
-
 class Session:
-    id, user_lesson_id (FK)
+    id, user_id, lesson_id
     state_json (JSON: {idx, phase, last_gaps})
     started_at, last_active_at, finished_at
 ```
 
-- **`user_lessons`**: one row per (user, lesson_id). The user's stable record
-  of having engaged with a lesson.
-- **`sessions`**: one row per attempt. Multiple in-progress sessions per
-  UserLesson are allowed — clicking *Start* on the Available tile always
-  inserts a new Session, leaving any prior in-progress sessions in the DB.
-  The user explicitly chooses which to resume from the Continue tiles.
+One table. Each row is one attempt at a lesson by a user. Multiple
+in-progress sessions per `(user_id, lesson_id)` are allowed — clicking
+*Start* always inserts a new row, leaving prior in-progress sessions
+alone. The user explicitly chooses which to resume from the Continue
+tiles.
+
+`user_id` and `lesson_id` are denormalized onto each session row.
+There's no separate `user_lessons` parent table — there was nothing
+per-(user, lesson) to attach to it, so it was premature abstraction.
+If cross-session features land later (mastery, preferences, total
+time-on-lesson), promoting back to a two-table model is a half-hour
+refactor.
 
 The agent's session lookup uses the **room name** as the join key —
 `POST /sessions` mints rooms named `tutor-{session_id}-{uuid}`, the agent extracts
@@ -241,7 +243,7 @@ across browser refreshes, network drops, and server restarts — the
 worst-case loss is the in-flight turn. No transcripts are persisted;
 state_json is the only durable artifact.
 
-**Multiple in-progress sessions per UserLesson.** A user who stops
+**Multiple in-progress sessions per (user, lesson).** A user who stops
 mid-lesson and clicks Start fresh later will have *two* in-progress
 sessions visible in Continue. They pick which to resume. No data is
 destroyed on Start.
@@ -282,7 +284,7 @@ Resume on the Continue tile and a new worker hydrates from the DB.
 ├── backend/                          # FastAPI + SQLite
 │   ├── app/
 │   │   ├── main.py                   # /health, /lessons, /sessions/*
-│   │   ├── db.py                     # UserLesson + Session models
+│   │   ├── db.py                     # Session model (single table)
 │   │   ├── lesson_catalog.py         # title/blurb/concept_names mirror
 │   │   └── livekit_token.py          # mint + room_name <→ session_id helpers
 │   └── tests/                        # (currently stale; see Tests below)

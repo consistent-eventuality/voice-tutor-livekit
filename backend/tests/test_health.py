@@ -250,7 +250,7 @@ def test_resume_rejects_finished_session():
 # ---------- Multi-attempt invariants ----------
 
 
-def test_multiple_in_progress_sessions_allowed_per_user_lesson():
+def test_multiple_in_progress_sessions_allowed_per_user_and_lesson():
     user = "multi-attempt-user"
     t1 = client.post(
         "/sessions", json={"user_id": user, "lesson_id": LESSON_ID}
@@ -266,14 +266,13 @@ def test_multiple_in_progress_sessions_allowed_per_user_lesson():
     assert {t1["session_id"], t2["session_id"]} <= ids
 
 
-def test_user_lesson_reused_across_attempts():
-    """Two Starts on the same lesson share one UserLesson row, but have
-    separate Session rows. Verified indirectly via /sessions list."""
-    user = "shared-userlesson-user"
+def test_repeated_starts_create_distinct_sessions_same_lesson_id():
+    """Two Starts on the same lesson insert two separate Session rows,
+    both tagged with the same lesson_id."""
+    user = "repeat-starts-user"
     client.post("/sessions", json={"user_id": user, "lesson_id": LESSON_ID})
     client.post("/sessions", json={"user_id": user, "lesson_id": LESSON_ID})
 
     body = client.get(f"/sessions?user_id={user}").json()
-    # Both sessions are tagged with the same lesson_id, so they share a UserLesson
     assert all(s["lesson_id"] == LESSON_ID for s in body)
     assert len(body) == 2
