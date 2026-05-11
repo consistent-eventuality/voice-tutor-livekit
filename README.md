@@ -401,10 +401,3 @@ be straightforward to test, but loop fidelity is qualitative (does the
 model actually speak the focused turn?) and depends on prompt quality
 which is fixture/out-of-scope.
 
-## TODO before submission
-
-- [ ] **Spin up a dedicated LiveKit Cloud project for this take-home.**
-  This scaffold currently reuses an existing personal LiveKit project for
-  development. Before submitting, create a fresh project at
-  <https://cloud.livekit.io>, generate new API key + secret, and update
-  `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`.
