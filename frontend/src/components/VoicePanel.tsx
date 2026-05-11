@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   BarVisualizer,
   LiveKitRoom,
@@ -25,19 +25,18 @@ export function VoicePanel({
 }: VoicePanelProps) {
   const [payload, setPayload] = useState<SessionPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Guard against React 19 StrictMode's double-invoked effects in dev — without
+  // this, every fresh-start mount inserts two Session rows on the backend.
+  // No cancelled flag: StrictMode's simulated cleanup would set it to true on
+  // the first closure, blocking setPayload when the in-flight POST resolves.
+  const firedRef = useRef(false)
 
   useEffect(() => {
-    let cancelled = false
+    if (firedRef.current) return
+    firedRef.current = true
     startOrResumeSession({ userId, lessonId, sessionId })
-      .then((p) => {
-        if (!cancelled) setPayload(p)
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-      })
-    return () => {
-      cancelled = true
-    }
+      .then(setPayload)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [userId, lessonId, sessionId])
 
   if (error) {

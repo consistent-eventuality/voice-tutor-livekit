@@ -1,19 +1,41 @@
 # voice-tutor-livekit
 
-A real-time voice AI tutor for **communication protocols** (HTTP, WebSockets,
-WebRTC) built on [LiveKit](https://livekit.io). The product isn't the LLM
-teaching — it's the **loop machinery** that turns "voice ChatGPT" into a
-structured tutor: teach → grade → adapt.
+A real-time voice AI tutor built on [LiveKit](https://livekit.io). The product
+isn't the LLM doing the teaching — it's the **loop machinery** that turns
+"voice AI" into a structured tutor: teach → grade → adapt. Intelligence
+is concentrated where it earns its keep (a single LLM call for grading); the
+rest is deterministic Python.
 
-## The hierarchy
+## Why this exists
+
+For the voice tutor I had two goals:
+
+- voice is not a gimmick
+- a curriculum and workflow that adds value over voice mode in horizontal apps like ChatGPT
+
+Research on what use cases work well for voice tutoring uncovered these insights:
+
+- Voice works best for skills where deliberate practice matters but people avoid doing the reps.
+- Voice is strongest when learners must produce understanding, not just consume information.
+- The real value comes from adaptive learning loops, not just voice-enabled conversation.
+- Strong tutors hide structured curriculum and progression underneath natural conversation.
+
+So I picked technical interview prep — all three preconditions are present:
+reps matter, people procrastinate on doing them, and verbal explanation
+surfaces gaps that silent reading doesn't. The framework extends to any
+subject that fits voice AI well; the loop machinery is the part that
+generalizes.
+
+## What it is
 
 ```
 Curriculum  =  DAG of Lessons (with prereq edges)              ← parked
-Lesson      =  ordered list of Concepts + metadata             ← built (1 lesson)
+Lesson      =  ordered list of Concepts + metadata             ← built (2 lessons)
 Concept     =  the loop primitive (TEACH → GRADE → RETEACH?)   ← THE ENGINE
 ```
 
-The Concept primitive is what makes this not a wrapper around ChatGPT-with-voice:
+The Concept primitive is what makes this not a wrapper around
+ChatGPT-with-voice:
 
 | Concern | Realized as |
 |---|---|
@@ -22,9 +44,15 @@ The Concept primitive is what makes this not a wrapper around ChatGPT-with-voice
 | **Grade the answer** | A separate `gpt-4o-mini` text completion with `response_format` JSON-schema enforcement. The **only** LLM call in the runtime path. |
 | **Decide next action** | A Python `if` in `state_machine.py:transition()`. Pass → advance. Fail → reteach. |
 
+The loop, at a glance:
+
+```
+TEACH  →  USER PRACTICE  →  EVALUATE  →  RETEACH OR PROGRESS
+```
+
 Each LLM call has prose for one task only. The if-statement lives in Python
-where if-statements work. The agent's voice never goes through an LLM —
-all spoken content is curated.
+where if-statements work. The agent's voice never goes through an LLM — all
+spoken content is curated.
 
 ## Quickstart
 
@@ -33,8 +61,14 @@ cp .env.example .env   # then fill in 4 keys (see below)
 docker compose up --build
 ```
 
-Open <http://localhost:5173>, click any lesson under **Available**, allow
-microphone access, and start talking.
+Open <http://localhost:5173> (use `localhost` or HTTPS — browsers block mic
+access over plain HTTP and LAN IPs), click any lesson under **Available**,
+allow microphone access, and start talking.
+
+> **Expect short pauses.** The tutor takes ~1–2s to start speaking after you
+> join (agent dispatch + first TTS), and ~500ms–1s after each of your turns
+> while the grader runs as a separate `gpt-4o-mini` call. Those pauses are
+> the loop running, not the app being stuck.
 
 > **Env precedence.** Compose reads variables from your shell first, falling
 > back to the `.env` file. If you already export `LIVEKIT_*` and
@@ -48,10 +82,6 @@ microphone access, and start talking.
 | `LIVEKIT_API_KEY` | Same place → Keys → Create new key |
 | `LIVEKIT_API_SECRET` | Same key, shown only once at creation |
 | `OPENAI_API_KEY` | <https://platform.openai.com/api-keys> (used for STT, TTS, and the grader) |
-
-Optional:
-- `VOICE_TUTOR_CHEAT` — magic phrase that skips grading and force-passes the
-  current concept. Default `"abracadabra"`. Useful for demoing the loop end-to-end fast.
 
 ### Verifying it's up
 
@@ -67,6 +97,7 @@ docker logs voice-tutor-agent | grep "registered worker"
 ```
 
 After a session, the agent log shows the loop running:
+
 ```
 INFO:voice-tutor-agent:Hydrated session 3: lesson=communication_protocols phase=teach idx=0
 INFO:voice-tutor-agent:User said: 'HTTP is a request-response protocol.'
@@ -74,58 +105,13 @@ INFO:voice-tutor-agent:Grade: concept=HTTP_BASICS score=7 gaps=[] phase_before=t
 INFO:voice-tutor-agent:Phase after transition: teach (idx=1)
 ```
 
-## The Concept loop, in detail
+### Tip: skip the grader
 
-```
-                  ┌────────────────────────────────────────┐
-                  │  agent.session.say(curated text)       │
-                  │  (bypasses LLM — pure TTS)             │
-                  ▼                                        │
-  ┌──────────────────────────────────────┐                 │
-  │  Agent (livekit-agents pipelined)    │                 │
-  │   ─ Whisper STT                      │                 │
-  │   ─ no LLM in voice path             │                 │
-  │   ─ TTS (OpenAI tts-1, voice=coral)  │                 │
-  └──────────┬───────────────────────────┘                 │
-             │ user finishes (Silero VAD detects turn)     │
-             ▼                                             │
-  ┌──────────────────────────────────────┐                 │
-  │  grader.grade(concept, user_text)    │                 │
-  │   gpt-4o-mini, response_format JSON  │                 │
-  │   → {score: int, gaps: list[str]}    │                 │
-  └──────────┬───────────────────────────┘                 │
-             ▼                                             │
-  ┌──────────────────────────────────────────────┐         │
-  │  state.transition(grade) — Python if/else    │         │
-  │    score ≥ PASS_THRESHOLD → advance          │         │
-  │    score <  PASS_THRESHOLD → reteach (loop)  │         │
-  └──────────┬───────────────────────────────────┘         │
-             ▼                                             │
-  ┌──────────────────────────────────────┐                 │
-  │  POST /sessions/{id}/state           │                 │
-  │  Persists state_json so a reconnect  │                 │
-  │  can pick up here.                   │                 │
-  └──────────┬───────────────────────────┘                 │
-             │                                             │
-             └─────────────────────────────────────────────┘
-                              loop until phase = done
-```
+Say **`"abracadabra"`** instead of an answer to skip the grader and force-pass
+the current concept. Walks a fresh lesson start-to-finish in ~30 seconds.
+Configurable via `VOICE_TUTOR_CHEAT` env if you want a different phrase.
 
-States: `teach` → `reteach` (on fail, loops to itself) → `done`. The
-`teach`/`reteach` distinction is purely about spoken wording — the
-re-teach prompt has a brief lead-in ("Let me walk through that one more
-time"). When `phase = done`, the agent speaks the lesson's `closing`
-line and shuts down on the `speaking → listening` transition.
-
-The five agent files that implement this:
-
-| File | Job |
-|---|---|
-| `agent/lesson.py` | `Concept`, `Lesson`, and the `LESSONS` registry. Pure data. |
-| `agent/prompts.py` | `teach_text()`, `reteach_text()`, `closing_text()`. Format spoken text. No LLM prompts. |
-| `agent/grader.py` | `Grader.grade()` — gpt-4o-mini with JSON-schema response_format. |
-| `agent/state_machine.py` | `LessonState` — pure Python, deterministic transitions, `to_dict` / `from_dict` for serialization. |
-| `agent/agent.py` | Wires it together. On dispatch: parse session_id from room name, fetch state, hydrate, run loop. On every transition: persist state. On final concept passed: speak closing, auto-disconnect. |
+---
 
 ## Architecture
 
@@ -135,7 +121,7 @@ The five agent files that implement this:
 │ (React) │◀───────────────│ port 8000        │  state_json (resumption)
 └────┬────┘                └──────────────────┘
      │                              ▲
-     │ WebRTC connect               │  POST /sessions/{id}/state
+     │ WebRTC connect               │  PUT /sessions/{id}/state
      │ (token in handshake)         │  GET /sessions/{id}
      ▼                              │
 ┌──────────────────────────────────┐│
@@ -180,7 +166,60 @@ WebRTC sessions.
 | `GET` | `/sessions/{id}` | Agent's lookup on dispatch. Returns `{lesson_id, state_json}`. |
 | `PUT` | `/sessions/{id}/state` | Agent PUTs after every state transition. Body: `{state_json}`. Idempotent — replays of the same state are safe. When `state_json.phase == "done"` the backend also sets `finished_at`. |
 
-### Persistence (Session only)
+## The Concept loop, in detail
+
+```
+                  ┌────────────────────────────────────────┐
+                  │  agent.session.say(curated text)       │
+                  │  (bypasses LLM — pure TTS)             │
+                  ▼                                        │
+  ┌──────────────────────────────────────┐                 │
+  │  Agent (livekit-agents pipelined)    │                 │
+  │   ─ Whisper STT                      │                 │
+  │   ─ no LLM in voice path             │                 │
+  │   ─ TTS (OpenAI tts-1, voice=coral)  │                 │
+  └──────────┬───────────────────────────┘                 │
+             │ user finishes (Silero VAD detects turn)     │
+             ▼                                             │
+  ┌──────────────────────────────────────┐                 │
+  │  grader.grade(concept, user_text)    │                 │
+  │   gpt-4o-mini, response_format JSON  │                 │
+  │   → {score: int, gaps: list[str]}    │                 │
+  └──────────┬───────────────────────────┘                 │
+             ▼                                             │
+  ┌──────────────────────────────────────────────┐         │
+  │  state.transition(grade) — Python if/else    │         │
+  │    score ≥ PASS_THRESHOLD → advance          │         │
+  │    score <  PASS_THRESHOLD → reteach (loop)  │         │
+  └──────────┬───────────────────────────────────┘         │
+             ▼                                             │
+  ┌──────────────────────────────────────┐                 │
+  │  PUT /sessions/{id}/state            │                 │
+  │  Persists state_json so a reconnect  │                 │
+  │  can pick up here.                   │                 │
+  └──────────┬───────────────────────────┘                 │
+             │                                             │
+             └─────────────────────────────────────────────┘
+                              loop until phase = done
+```
+
+States: `teach` → `reteach` (on fail, loops to itself) → `done`. The
+`teach`/`reteach` distinction is purely about spoken wording — the re-teach
+prompt has a brief lead-in ("Let me walk through that one more time"). When
+`phase = done`, the agent speaks the lesson's `closing` line and shuts down
+on the `speaking → listening` transition.
+
+The five agent files that implement this:
+
+| File | Job |
+|---|---|
+| `agent/lesson.py` | `Concept`, `Lesson`, and the `LESSONS` registry. Pure data. |
+| `agent/prompts.py` | `teach_text()`, `reteach_text()`, `closing_text()`. Format spoken text. No LLM prompts. |
+| `agent/grader.py` | `Grader.grade()` — gpt-4o-mini with JSON-schema response_format. |
+| `agent/state_machine.py` | `LessonState` — pure Python, deterministic transitions, `to_dict` / `from_dict` for serialization. |
+| `agent/agent.py` | Wires it together. On dispatch: parse session_id from room name, fetch state, hydrate, run loop. On every transition: persist state. On final concept passed: speak closing, auto-disconnect. |
+
+## Persistence
 
 ```python
 class Session:
@@ -189,23 +228,21 @@ class Session:
     started_at, last_active_at, finished_at
 ```
 
-One table. Each row is one attempt at a lesson by a user. Multiple
-in-progress sessions per `(user_id, lesson_id)` are allowed — clicking
-*Start* always inserts a new row, leaving prior in-progress sessions
-alone. The user explicitly chooses which to resume from the Continue
-tiles.
+One table. Each row is one attempt at a lesson by a user. Multiple in-progress
+sessions per `(user_id, lesson_id)` are allowed — clicking *Start* always
+inserts a new row, leaving prior in-progress sessions alone. The user
+explicitly chooses which to resume from the Continue tiles.
 
-`user_id` and `lesson_id` are denormalized onto each session row.
-There's no separate `user_lessons` parent table — there was nothing
-per-(user, lesson) to attach to it, so it was premature abstraction.
-If cross-session features land later (mastery, preferences, total
-time-on-lesson), promoting back to a two-table model is a half-hour
-refactor.
+`user_id` and `lesson_id` are denormalized onto each session row. There's no
+separate `user_lessons` parent table — there was nothing per-(user, lesson) to
+attach to it, so it was premature abstraction. If cross-session features land
+later (mastery, preferences, total time-on-lesson), promoting back to a
+two-table model is a half-hour refactor.
 
 The agent's session lookup uses the **room name** as the join key —
-`POST /sessions` mints rooms named `tutor-{session_id}-{uuid}`, the agent extracts
-`session_id` from that and calls `GET /sessions/{id}`. No `room_name`
-column is needed.
+`POST /sessions` mints rooms named `tutor-{session_id}-{uuid}`, the agent
+extracts `session_id` from that and calls `GET /sessions/{id}`. No
+`room_name` column is needed.
 
 User identity is an anonymous UUID generated client-side and stored in
 `localStorage`.
@@ -215,41 +252,41 @@ User identity is an anonymous UUID generated client-side and stored in
 **Pipelined STT/LLM/TTS, not Realtime.** We started with OpenAI Realtime
 (speech-to-speech) for low latency, but it handles turn detection and
 transcription server-side, which means livekit-agents'
-`Agent.on_user_turn_completed` hook fires *without* the user's text —
-making it impossible to grade and run the state machine deterministically.
-Switching to pipelined Whisper + gpt-4o-mini + tts-1 + Silero VAD lets the
-framework own turn boundaries; the hook fires with text and the loop
-works. ~200ms more latency vs Realtime, significantly cheaper per minute.
+`Agent.on_user_turn_completed` hook fires *without* the user's text — making
+it impossible to grade and run the state machine deterministically. Switching
+to pipelined Whisper + gpt-4o-mini + tts-1 + Silero VAD lets the framework
+own turn boundaries; the hook fires with text and the loop works. ~200ms more
+latency vs Realtime, significantly cheaper per minute.
 
-**Static curated content via `session.say()`, not LLM-generated turns.**
-After early experiments with LLM-driven teach/reteach prompts (which drift
-into language-tutor mode, acknowledge prior turns, ramble), all agent
-voice goes through `session.say(static_text)` which bypasses the LLM
-entirely. The LLM is required by `AgentSession` but never invoked for
-content; we raise `StopResponse` from every hook exit to suppress the
-framework's auto-reply. Reviewer reads a string in `lesson.py`, hears that
-string verbatim.
+**Static curated content via `session.say()`, not LLM-generated turns.** Early
+experiments with LLM-driven teach/reteach prompts drifted into language-tutor
+mode, acknowledged prior turns, and rambled. So all agent voice now goes
+through `session.say(static_text)`, which bypasses the LLM entirely. The LLM
+is required by `AgentSession` but never invoked for content; we raise
+`StopResponse` from every hook exit to suppress the framework's auto-reply.
+A reviewer reads a string in `lesson.py` and hears that string verbatim.
 
-**Externalized grading.** Realtime models drift on multi-step prose
-instructions. "If grade < N then reteach" works in testing and silently
-fails in prod. So the grader is a separate gpt-4o-mini text completion
-with `response_format: json_schema(strict)`. The OpenAI API itself
-validates output shape; the grader cannot return malformed JSON. The
-if-statement on the score is in Python where if-statements work.
+**Externalized grading.** LLMs drift on multi-step prose instructions. "If
+grade < N then reteach" works in testing and silently fails in prod. So the
+grader is a separate gpt-4o-mini text completion with `response_format:
+json_schema(strict)`. The OpenAI API itself validates output shape; the
+grader cannot return malformed JSON. The if-statement on the score is in
+Python where if-statements work. This is the through-line of the whole build:
+**intelligence concentrated where it earns its keep**.
 
-**Per-transition state save.** Every `state.transition()` triggers an
-HTTP POST to `/sessions/{id}/state`. This makes the lesson resumable
-across browser refreshes, network drops, and server restarts — the
-worst-case loss is the in-flight turn. No transcripts are persisted;
-state_json is the only durable artifact.
+**Per-transition state save.** Every `state.transition()` triggers a PUT to
+`/sessions/{id}/state`. This makes the lesson resumable across browser
+refreshes, network drops, and server restarts — worst-case loss is the
+in-flight turn. No transcripts are persisted; state_json is the only durable
+artifact.
 
 **Multiple in-progress sessions per (user, lesson).** A user who stops
-mid-lesson and clicks Start fresh later will have *two* in-progress
-sessions visible in Continue. They pick which to resume. No data is
-destroyed on Start.
+mid-lesson and clicks Start fresh later will have *two* in-progress sessions
+visible in Continue. They pick which to resume. No data is destroyed on
+Start.
 
-**SQLite for persistence.** Single file at `data/voice_tutor.db`, two
-tables, no migrations framework. Postgres swap is one URL change.
+**SQLite for persistence.** Single file at `data/voice_tutor.db`, one table,
+no migrations framework. Postgres swap is one URL change.
 
 **No auth.** Reviewers shouldn't have to sign up. JWT middleware on
 `/sessions` is the drop-in for real multi-user.
@@ -260,17 +297,17 @@ Two axes scale separately:
 
 - **Token API (FastAPI)** is stateless and trivial to horizontally scale —
   put it behind any HTTP autoscaler (k8s HPA, ECS, Railway). 10k sessions
-  doesn't mean 10k token-mints/sec; it's one call per session join plus
-  one POST per turn for state save.
-- **Agent worker pool**. Each worker handles N concurrent sessions
+  doesn't mean 10k token-mints/sec; it's one call per session join plus one
+  PUT per turn for state save.
+- **Agent worker pool.** Each worker handles N concurrent sessions
   (`WorkerOptions.num_idle_processes`). For 10k:
   - Run agents as a horizontally-scaled stateless Deployment, scaled on
     CPU + active-session count.
-  - LiveKit Cloud handles SFU/TURN auto-scaling. Self-hosting would mean
-    a LiveKit cluster + Redis + TURN.
+  - LiveKit Cloud handles SFU/TURN auto-scaling. Self-hosting would mean a
+    LiveKit cluster + Redis + TURN.
   - Swap SQLite for Postgres + add Redis for hot session lookups.
-  - Watch OpenAI rate limits — at this scale you'd negotiate higher
-    quotas or pool across keys.
+  - Watch OpenAI rate limits — at this scale you'd negotiate higher quotas
+    or pool across keys.
   - The Python state machine is per-job, stateless across workers, so no
     cross-worker coordination is needed.
 
@@ -287,7 +324,7 @@ Resume on the Continue tile and a new worker hydrates from the DB.
 │   │   ├── db.py                     # Session model (single table)
 │   │   ├── lesson_catalog.py         # title/blurb/concept_names mirror
 │   │   └── livekit_token.py          # mint + room_name <→ session_id helpers
-│   └── tests/                        # (currently stale; see Tests below)
+│   └── tests/                        # pytest, in-memory SQLite per run
 ├── agent/                            # livekit-agents worker
 │   ├── agent.py                      # state-machine orchestration
 │   ├── lesson.py                     # Lesson dataclass + LESSONS registry
@@ -311,60 +348,26 @@ Resume on the Continue tile and a new worker hydrates from the DB.
 
 ## Out of scope (deliberately)
 
-These are explicitly parked. Each is a clear next step:
+Parked across product and engineering — each is a clear next step:
 
-- **Curriculum content quality and breadth.** One fixture lesson with 4
-  concepts. Production wants many more, expert-written, editorially reviewed.
-- **Prompt tuning.** Every prompt (teach, reteach, grader) is first-cut.
-  A real ship would A/B against held-out transcripts to tune wording, the
-  grading threshold, and reteach behavior.
-- **Tailored reteach via LLM.** Currently reteach re-reads the same teach
-  text with a brief lead-in. The future version uses a `Reteacher` LLM
-  call that takes `(concept, gaps_from_grader)` and produces a 2-3
-  sentence explanation tailored to the user's specific misunderstanding.
-  `state.last_gaps` is already populated; this is a one-function add.
-- **Persisting grades.** `Grade` flows through Python in-session but isn't
-  written to DB. The next step is a per-(session, concept) grades table
-  for analytics and cross-session adaptation.
-- **Cross-session adaptation.** Home doesn't show mastery across sessions;
-  the agent doesn't get prior mastery in its instructions. State_json
-  carries last_gaps within a session; persisting graded misconceptions
-  across sessions unlocks "you struggled with X last time, let's start there."
-- **Upper bound on reteach attempts.** Currently a user can stay on a
-  concept indefinitely. Production would have escalation rules ("third
-  miss → flag for review") and a user-facing skip option.
-- **Curriculum as a DAG.** Current `LESSONS` is a flat dict. The natural
-  next shape is a Curriculum — a DAG of Lessons with prereq edges. The
-  state machine would walk the DAG: branch into sub-lessons on weak
-  answers, skip ahead when prereqs are mastered, surface "you're ready
-  for X next" affordances.
-- **Auth.** Anonymous UUID in localStorage. JWT middleware on `/sessions`
-  is the drop-in.
+**Product / content**
 
-## Gotchas
+- **Polished frontend.** The frontend was AI-generated end-to-end so engineering effort could concentrate on the loop machinery.
+- **Clarify phase.** A voice tutor should let the user ask questions. A `clarify` phase + a separate `Clarifier` LLM call slots into the state machine alongside `teach` / `reteach`.
+- **Speech-skill detection and coaching.** Pronunciation, accent, words per minute, speaking style. Not in scope here; possible against the same STT stream.
+- **Curriculum content quality and breadth.** Two fixture lessons. Production wants many more, expert-written, editorially reviewed.
 
-- `LIVEKIT_URL` must start with `wss://`, not `https://`.
-- Microphone permission requires `localhost` or HTTPS — testing via your
-  LAN IP fails silently with no audio.
-- Hot-reload (`agent.py dev`) doesn't re-join rooms that are already live;
-  refresh the browser after agent code edits.
-- The agent worker must be able to reach LiveKit Cloud over outbound
-  WebSocket. If it boots and immediately exits, check `LIVEKIT_API_KEY`
-  / `LIVEKIT_API_SECRET`.
-- The grader is a separate API call (`gpt-4o-mini`) per user turn. It's
-  fast (~500ms-1s) but adds a noticeable pause between you finishing
-  speaking and the tutor's next turn.
-- After clicking Disconnect or finishing a lesson, the Continue list
-  isn't auto-refreshed on the next Home mount — refresh the browser to
-  see the latest state. (The `/sessions` filter is correct; the UI just
-  doesn't re-fetch on navigation.)
+**Engineering**
 
-## Cheat code (for demos and testing)
-
-Say **`"abracadabra"`** instead of an answer to skip the grader and
-force-pass the current concept. Walks a fresh lesson from start to finish
-in ~30 seconds. Logged distinctly in the agent (`[CHEAT] phrase=...`).
-Configurable via `VOICE_TUTOR_CHEAT` env if you want a different word.
+- **Prompt tuning.** Every prompt (teach, reteach, grader) is first-cut. A real ship would A/B against held-out transcripts to tune wording, the grading threshold, and reteach behavior.
+- **Tailored reteach via LLM.** Reteach currently re-reads the same teach text with a brief lead-in. The future version uses a `Reteacher` LLM call that takes `(concept, gaps_from_grader)` and produces a 2–3 sentence explanation tailored to the user's specific misunderstanding. `state.last_gaps` is already populated; this is a one-function add.
+- **Persisting grades.** `Grade` flows through Python in-session but isn't written to DB. A per-(session, concept) grades table unlocks analytics and cross-session adaptation.
+- **Cross-session learning progression.** Home doesn't show mastery, streaks, or prior-misconception flags. Persisting graded misconceptions across sessions unlocks "you struggled with X last time, let's start there."
+- **Upper bound on reteach attempts.** A user can stay on a concept indefinitely. Production would have escalation rules ("third miss → flag for review") and a user-facing skip option.
+- **Curriculum as a DAG.** Current `LESSONS` is a flat dict. The natural next shape is a Curriculum — a DAG of Lessons with prereq edges. The state machine would walk the DAG: branch into sub-lessons on weak answers, skip ahead when prereqs are mastered, surface "you're ready for X next" affordances.
+- **Voice-chat performance tuning.** Turn-detection thresholds, VAD sensitivity, TTS streaming latency, barge-in handling — all left at framework defaults.
+- **Auth.** Anonymous UUID in localStorage. JWT middleware on `/sessions` is the drop-in.
+- **Exhaustive testing.** The happy path and the main negative path (user fails the grader) are covered; beyond that, manual.
 
 ## Running pieces individually
 
@@ -389,15 +392,14 @@ cd frontend && npm install && npm run dev
 cd backend && pytest
 ```
 
-`backend/tests/test_health.py` covers the FastAPI surface end-to-end:
-catalog, fresh start, resume, finished-session exclusion, cross-user
-guard rails, multi-attempt invariants, state save round-trip, and the
+`backend/tests/test_health.py` covers the FastAPI surface end-to-end: catalog,
+fresh start, resume, finished-session exclusion, cross-user guard rails,
+multi-attempt invariants, state save round-trip, and the
 room-name-encodes-session-id scheme. 18 tests, ~0.5s runtime, in-memory
 SQLite per run.
 
 The agent's state machine and grader don't have automated tests in this
-build — both are pure functions (the state machine especially) and would
-be straightforward to test, but loop fidelity is qualitative (does the
-model actually speak the focused turn?) and depends on prompt quality
-which is fixture/out-of-scope.
-
+build — both are pure functions (the state machine especially) and would be
+straightforward to test, but loop fidelity is qualitative (does the model
+actually speak the focused turn?) and depends on prompt quality, which is
+fixture/out-of-scope.

@@ -1,5 +1,8 @@
 export function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime()
+  // Backend emits naive datetimes (no TZ offset). Treat them as UTC so the JS
+  // Date parser doesn't interpret them as local time and put them in the future.
+  const utcIso = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z'
+  const ms = Date.now() - new Date(utcIso).getTime()
   const min = Math.floor(ms / 60_000)
   if (min < 1) return 'just now'
   if (min < 60) return `${min} min ago`
