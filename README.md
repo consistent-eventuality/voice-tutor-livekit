@@ -3,7 +3,7 @@
 For the voice tutor I had two goals:
 
 - voice is not a gimmick
-- a curriculum and workflow that adds value over voice mode in horizontal apps like ChatGPT
+- a curriculum and workflow that adds value over voice mode in horizontal apps like ChatGPT.
 
 Research on what use cases work well for voice tutoring uncovered these insights:
 
@@ -18,48 +18,14 @@ surfaces gaps that silent reading doesn't. The framework extends to any
 subject that fits voice AI well; the loop machinery is the part that
 generalizes.
 
-### Bonus features delivered
-
-- **Session resumability.** Every state transition is persisted via
-  `PUT /sessions/{id}/state`. Disconnect mid-lesson and the session shows
-  up under **Resume in progress** on the home screen — click it and a new
-  agent worker hydrates from the DB at exactly the concept you were on.
-- **Connection-drop recovery.** Same mechanism. A network blip, browser
-  refresh, or even a worker crash is recoverable: the user's worst-case
-  loss is the in-flight turn.
-
-### Post-session summary — how I'd build it
-
-Not built, but here's the shape. The brief's "key topics + suggested
-follow-ups" wants two inputs the agent already produces:
-
-1. **Transcript** — capture every `session.say(...)` and
-   `on_user_turn_completed(text)` into a `transcript_json` column on
-   `sessions`, written per turn alongside `state_json`.
-2. **Gaps** — accumulate per-concept gaps from the grader's existing
-   `Grade(score, gaps)` output into `state_json.gaps_by_concept`
-   (no schema change).
-
-On `phase == "done"`, one LLM call with both inputs and a strict
-`response_format` JSON schema produces `{covered, struggled, next_focus}`.
-Persist to a `summary_json` column. Surface on Home → Recently completed.
-
 ## Curriculum, Lesson and Concept
 
 ```
-Curriculum  =  DAG of Lessons (Out of scope)
-Lesson      =  ordered list of Concepts + metadata (built 2 lessons)
+Curriculum  =  DAG of Lessons (out of scope)
+Lesson      =  ordered list of Concepts  (built 2 lessons)
 Concept     =  the loop primitive (TEACH → GRADE → RETEACH?)   
 ```
-
-The Concept primitive is what makes this not a wrapper around ChatGPT-with-voice:
-
-| Concern | Realized as |
-|---|---|
-| **Voice Tutoring** | `AgentSession.say(static_text)` — bypasses the LLM. Content comes verbatim from `agent/lesson.py`. |
-| **Transcribe the user's answer** | OpenAI Whisper (streaming STT plugin) |
-| **Grade the answer** | A separate `gpt-4o-mini` text completion with `response_format` JSON-schema enforcement. The **only** LLM call in the runtime path. |
-| **Decide next action** | A Python `if` in `state_machine.py:transition()`. Pass → advance. Fail → reteach. |
+The Concept tutoring loop is what makes this not a wrapper around ChatGPT-with-voice.
 
 The loop, at a glance:
 
@@ -68,6 +34,24 @@ TEACH  →  USER PRACTICE  →  EVALUATE  →  RETEACH OR PROGRESS
 ```
 
  The agent's voice never goes through an LLM — all spoken content is curated.
+
+| Concern | Realized as |
+|---|---|
+| **Voice Tutoring** | `AgentSession.say(static_text)` — bypasses the LLM. Content comes verbatim from `agent/lesson.py`. |
+| **Transcribe the user's answer** | OpenAI Whisper (streaming STT plugin) |
+| **Grade the answer** | A separate `gpt-4o-mini` text completion with `response_format` JSON-schema enforcement. The **only** LLM call in the runtime path. |
+| **Decide next action** | Python code . Pass → advance. Fail → reteach. |
+
+ ### Bonus features delivered
+
+- **Session resumability.** Disconnect mid-lesson and the session shows
+  up under **Resume in progress** on the home screen — click it and you
+  pick up from the same concept on a fresh agent worker.
+- **Connection-drop recovery.** Same mechanism covers network blips,
+  browser refreshes, and worker crashes. Worst-case loss is the in-flight
+  turn.
+- **Post-session summary** — not built. Design sketch below
+  ([Post-session summary (design sketch)](#post-session-summary-design-sketch)).
 
 ### Tip: skip the grader
 
@@ -139,7 +123,7 @@ Parked across product and engineering — each is a clear next step:
 
 **Engineering**
 
-- **Prompt tuning.** A real ship would A/B against held-out transcripts to tune wording, the grading threshold, and reteach behavior.
+- **Prompt tuning.** Production would A/B against transcripts to tune wording, the grading threshold, and reteach behavior.
 - **Tailored reteach via LLM.** Reteach currently re-reads the same teach text with a brief lead-in. The future version uses a `Reteacher` LLM call that takes `(concept, gaps_from_grader)` and produces a 2–3 sentence explanation tailored to the user's specific misunderstanding. `state.last_gaps` is already populated; this is a one-function add.
 - **Persisting grades.** `Grade` flows through Python in-session but isn't written to DB. A per-(session, concept) grades table unlocks analytics and cross-session adaptation.
 - **Cross-session learning progression.** Home doesn't show mastery, streaks, or prior-misconception flags. Persisting graded misconceptions across sessions unlocks "you struggled with X last time, let's start there."
@@ -147,7 +131,7 @@ Parked across product and engineering — each is a clear next step:
 - **Curriculum as a DAG.** Current `LESSONS` is a flat dict. The natural next shape is a Curriculum — a DAG of Lessons with prereq edges. The state machine would walk the DAG: branch into sub-lessons on weak answers, skip ahead when prereqs are mastered, surface "you're ready for X next" affordances.
 - **Voice-chat performance tuning.** Turn-detection thresholds, VAD sensitivity, TTS streaming latency — all left at framework defaults.
 - **Auth.** Anonymous UUID in localStorage. JWT middleware on `/sessions` is the drop-in.
-- **Exhaustive testing.** The happy path and the main negative path (user fails the grader) are covered; edgecase not exhaustively tested.
+- **Exhaustive testing.** I tested the happy path and the main negative path (user fails the grader); edgecases not exhaustively tested. Did not focus on test coverage and only on getting the core loop to work.
 
 ---
 
@@ -303,12 +287,11 @@ is required by `AgentSession` but never invoked for content; we raise
 A reviewer reads a string in `lesson.py` and hears that string verbatim.
 
 **Externalized grading.** LLMs drift on multi-step prose instructions. "If
-grade < N then reteach" works in testing and silently fails in prod. So the
+grade < N then reteach" cannot be deterministically guaranteed in a prompt. So the
 grader is a separate gpt-4o-mini text completion with `response_format:
 json_schema(strict)`. The OpenAI API itself validates output shape; the
-grader cannot return malformed JSON. The if-statement on the score is in
-Python where if-statements work. This is the through-line of the whole build:
-**intelligence concentrated where it earns its keep**.
+grader cannot return malformed JSON. Logical branching happens in Python.
+**Intelligence concentrated to grading i.e. feedback on user speech**.
 
 **Per-transition state save.** Every `state.transition()` triggers a PUT to
 `/sessions/{id}/state`. This makes the lesson resumable across browser
@@ -326,6 +309,23 @@ no migrations framework. Postgres swap is one URL change.
 
 **No auth.** Reviewers shouldn't have to sign up. JWT middleware on
 `/sessions` is the drop-in for real multi-user.
+
+## Post-session summary (design sketch)
+
+Not built, but the agent already produces the two inputs a real summary
+needs:
+
+1. **Transcript** — capture every `session.say(...)` and
+   `on_user_turn_completed(text)` into a `transcript_json` column on
+   `sessions`, written per turn alongside `state_json`.
+2. **Gaps** — accumulate per-concept gaps from the grader's existing
+   `Grade(score, gaps)` output into `state_json.gaps_by_concept`
+   (no schema change — rides on the existing JSON blob).
+
+On `phase == "done"`, one LLM call with both inputs and a strict
+`response_format` JSON schema produces `{covered, struggled, next_focus}`.
+Persist to a `summary_json` column. Surface on Home → **Recently
+completed**. Estimated build: ~30 min, no new infra.
 
 ## Scaling to 10k concurrent sessions
 
