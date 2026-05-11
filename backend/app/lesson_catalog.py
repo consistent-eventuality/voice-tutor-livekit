@@ -1,5 +1,7 @@
 """Backend-side mirror of agent/lesson.py LESSONS metadata.
 
+For a production system this would be in a database. This is static content. 
+
 The agent owns the actual lesson content (concepts + teach text). The
 backend only needs the *shape* of each lesson — title, blurb, and how
 many concepts it has — so it can serve `GET /lessons` and compute

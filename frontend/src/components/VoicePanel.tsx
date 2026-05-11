@@ -6,7 +6,7 @@ import {
   VoiceAssistantControlBar,
   useVoiceAssistant,
 } from '@livekit/components-react'
-import { fetchToken, type TokenPayload } from '../api'
+import { startOrResumeSession, type SessionPayload } from '../api'
 
 interface VoicePanelProps {
   userId: string
@@ -23,12 +23,12 @@ export function VoicePanel({
   lessonTitle,
   onLeave,
 }: VoicePanelProps) {
-  const [payload, setPayload] = useState<TokenPayload | null>(null)
+  const [payload, setPayload] = useState<SessionPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    fetchToken({ userId, lessonId, sessionId })
+    startOrResumeSession({ userId, lessonId, sessionId })
       .then((p) => {
         if (!cancelled) setPayload(p)
       })

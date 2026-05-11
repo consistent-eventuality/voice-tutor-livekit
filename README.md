@@ -130,7 +130,7 @@ The five agent files that implement this:
 ## Architecture
 
 ```
-┌─────────┐  POST /token   ┌──────────────────┐
+┌─────────┐ POST /sessions ┌──────────────────┐
 │ Browser │───────────────▶│ FastAPI (api)    │  user_lessons + sessions
 │ (React) │◀───────────────│ port 8000        │  state_json (resumption)
 └────┬────┘                └──────────────────┘
@@ -175,10 +175,10 @@ WebRTC sessions.
 |---|---|---|
 | `GET` | `/health` | Smoke test |
 | `GET` | `/lessons` | Catalog of available lesson definitions: `[{id, title, blurb, concept_count}]`. Backed by `backend/app/lesson_catalog.py`. |
-| `POST` | `/token` | Mint LiveKit JWT. Body: `{user_id, lesson_id?, session_id?}`. Pass `session_id` to resume a specific session; pass `lesson_id` to start a fresh one. |
+| `POST` | `/sessions` | Create a Session (or resume one). Body: `{user_id, lesson_id?, session_id?}`. Pass `session_id` to resume a specific session; pass `lesson_id` to start a fresh one. Returns the LiveKit JWT + room name. |
 | `GET` | `/sessions?user_id=...` | The user's in-progress sessions for the **Continue** tiles. Includes `current_concept_name`, `idx`, `phase`, `last_active_at`. |
 | `GET` | `/sessions/{id}` | Agent's lookup on dispatch. Returns `{lesson_id, state_json}`. |
-| `POST` | `/sessions/{id}/state` | Agent posts after every state transition. Body: `{state_json}`. When `state_json.phase == "done"` the backend also sets `finished_at`. |
+| `PUT` | `/sessions/{id}/state` | Agent PUTs after every state transition. Body: `{state_json}`. Idempotent — replays of the same state are safe. When `state_json.phase == "done"` the backend also sets `finished_at`. |
 
 ### Persistence (UserLesson + Session)
 
@@ -201,7 +201,7 @@ class Session:
   The user explicitly chooses which to resume from the Continue tiles.
 
 The agent's session lookup uses the **room name** as the join key —
-`/token` mints rooms named `tutor-{session_id}-{uuid}`, the agent extracts
+`POST /sessions` mints rooms named `tutor-{session_id}-{uuid}`, the agent extracts
 `session_id` from that and calls `GET /sessions/{id}`. No `room_name`
 column is needed.
 
@@ -250,7 +250,7 @@ destroyed on Start.
 tables, no migrations framework. Postgres swap is one URL change.
 
 **No auth.** Reviewers shouldn't have to sign up. JWT middleware on
-`/token` is the drop-in for real multi-user.
+`/sessions` is the drop-in for real multi-user.
 
 ## Scaling to 10k concurrent sessions
 
@@ -281,7 +281,7 @@ Resume on the Continue tile and a new worker hydrates from the DB.
 .
 ├── backend/                          # FastAPI + SQLite
 │   ├── app/
-│   │   ├── main.py                   # /health, /lessons, /token, /sessions/*
+│   │   ├── main.py                   # /health, /lessons, /sessions/*
 │   │   ├── db.py                     # UserLesson + Session models
 │   │   ├── lesson_catalog.py         # title/blurb/concept_names mirror
 │   │   └── livekit_token.py          # mint + room_name <→ session_id helpers
@@ -336,8 +336,8 @@ These are explicitly parked. Each is a clear next step:
   state machine would walk the DAG: branch into sub-lessons on weak
   answers, skip ahead when prereqs are mastered, surface "you're ready
   for X next" affordances.
-- **Auth.** Anonymous UUID in localStorage. JWT middleware on `/token` is
-  the drop-in.
+- **Auth.** Anonymous UUID in localStorage. JWT middleware on `/sessions`
+  is the drop-in.
 
 ## Gotchas
 

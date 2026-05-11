@@ -2,7 +2,7 @@ const API_BASE = import.meta.env.DEV
   ? '/api'
   : (import.meta.env.VITE_API_URL ?? '')
 
-export interface TokenPayload {
+export interface SessionPayload {
   token: string
   url: string
   room_name: string
@@ -31,13 +31,13 @@ export interface InProgressSession {
   last_active_at: string
 }
 
-export async function fetchToken(opts: {
+export async function startOrResumeSession(opts: {
   userId: string
   lessonId?: string | null
   sessionId?: number | null
   participantName?: string
-}): Promise<TokenPayload> {
-  const res = await fetch(`${API_BASE}/token`, {
+}): Promise<SessionPayload> {
+  const res = await fetch(`${API_BASE}/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -49,7 +49,7 @@ export async function fetchToken(opts: {
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`Token request failed: ${res.status} ${text}`)
+    throw new Error(`Session create/resume failed: ${res.status} ${text}`)
   }
   return res.json()
 }

@@ -1,8 +1,8 @@
 """Smoke + integration tests for the FastAPI surface.
 
-Covers /health, /lessons (catalog), /token (start + resume), /sessions
-(list + lookup-by-id + state save), and the cross-user / finished-session
-guard rails.
+Covers /health, /lessons (catalog), POST /sessions (create + resume),
+GET /sessions (list), GET /sessions/{id} (agent lookup), PUT
+/sessions/{id}/state, and the cross-user / finished-session guard rails.
 
 Uses a temp SQLite file per test run so tests don't pollute local data.
 """
@@ -56,12 +56,12 @@ def test_lessons_catalog_returns_communication_protocols():
     assert "blurb" in lesson and lesson["blurb"]
 
 
-# ---------- /token (start fresh) ----------
+# ---------- POST /sessions (start fresh) ----------
 
 
-def test_token_starts_fresh_lesson():
+def test_create_session_starts_fresh_lesson():
     res = client.post(
-        "/token",
+        "/sessions",
         json={"user_id": USER_ID, "lesson_id": LESSON_ID},
     )
     assert res.status_code == 200
@@ -74,9 +74,9 @@ def test_token_starts_fresh_lesson():
     assert body["resuming"] is False
 
 
-def test_token_room_name_encodes_session_id():
+def test_create_session_room_name_encodes_session_id():
     body = client.post(
-        "/token",
+        "/sessions",
         json={"user_id": USER_ID, "lesson_id": LESSON_ID},
     ).json()
     parts = body["room_name"].split("-")
@@ -84,16 +84,16 @@ def test_token_room_name_encodes_session_id():
     assert int(parts[1]) == body["session_id"]
 
 
-def test_token_rejects_unknown_lesson_id():
+def test_create_session_rejects_unknown_lesson_id():
     res = client.post(
-        "/token",
+        "/sessions",
         json={"user_id": USER_ID, "lesson_id": "nope_does_not_exist"},
     )
     assert res.status_code == 404
 
 
-def test_token_requires_lesson_id_or_session_id():
-    res = client.post("/token", json={"user_id": USER_ID})
+def test_create_session_requires_lesson_id_or_session_id():
+    res = client.post("/sessions", json={"user_id": USER_ID})
     assert res.status_code == 400
 
 
@@ -102,7 +102,7 @@ def test_token_requires_lesson_id_or_session_id():
 
 def test_in_progress_sessions_listed_with_concept_name():
     user = "list-test-user"
-    client.post("/token", json={"user_id": user, "lesson_id": LESSON_ID})
+    client.post("/sessions", json={"user_id": user, "lesson_id": LESSON_ID})
 
     res = client.get(f"/sessions?user_id={user}")
     assert res.status_code == 200
@@ -120,12 +120,12 @@ def test_in_progress_sessions_listed_with_concept_name():
 def test_in_progress_sessions_excludes_finished():
     user = "finished-test-user"
     token = client.post(
-        "/token", json={"user_id": user, "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": user, "lesson_id": LESSON_ID}
     ).json()
     sid = token["session_id"]
 
     # Mark the session done via a state save
-    client.post(
+    client.put(
         f"/sessions/{sid}/state",
         json={"state_json": {"idx": 4, "phase": "done", "last_gaps": []}},
     )
@@ -140,7 +140,7 @@ def test_in_progress_sessions_excludes_finished():
 
 def test_session_lookup_returns_state_and_lesson():
     token = client.post(
-        "/token", json={"user_id": USER_ID, "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": USER_ID, "lesson_id": LESSON_ID}
     ).json()
     sid = token["session_id"]
 
@@ -158,17 +158,17 @@ def test_session_lookup_404_for_unknown_id():
     assert res.status_code == 404
 
 
-# ---------- POST /sessions/{id}/state ----------
+# ---------- PUT /sessions/{id}/state ----------
 
 
 def test_state_save_persists_and_lookup_reads_back():
     token = client.post(
-        "/token", json={"user_id": USER_ID, "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": USER_ID, "lesson_id": LESSON_ID}
     ).json()
     sid = token["session_id"]
 
     new_state = {"idx": 2, "phase": "reteach", "last_gaps": ["didn't mention NAT"]}
-    res = client.post(f"/sessions/{sid}/state", json={"state_json": new_state})
+    res = client.put(f"/sessions/{sid}/state", json={"state_json": new_state})
     assert res.status_code == 200
     assert res.json()["status"] == "ok"
 
@@ -180,11 +180,11 @@ def test_state_save_persists_and_lookup_reads_back():
 def test_state_save_done_marks_finished_and_drops_from_list():
     user = "done-test-user"
     token = client.post(
-        "/token", json={"user_id": user, "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": user, "lesson_id": LESSON_ID}
     ).json()
     sid = token["session_id"]
 
-    client.post(
+    client.put(
         f"/sessions/{sid}/state",
         json={"state_json": {"idx": 4, "phase": "done", "last_gaps": []}},
     )
@@ -195,7 +195,7 @@ def test_state_save_done_marks_finished_and_drops_from_list():
 
 
 def test_state_save_orphan_returns_200_not_404():
-    res = client.post(
+    res = client.put(
         "/sessions/99999/state",
         json={"state_json": {"idx": 0, "phase": "teach", "last_gaps": []}},
     )
@@ -203,17 +203,17 @@ def test_state_save_orphan_returns_200_not_404():
     assert res.json()["status"] == "orphan"
 
 
-# ---------- /token (resume) ----------
+# ---------- POST /sessions (resume) ----------
 
 
 def test_resume_session_rotates_room_name_keeps_session_id():
     user = "resume-test-user"
     t1 = client.post(
-        "/token", json={"user_id": user, "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": user, "lesson_id": LESSON_ID}
     ).json()
 
     t2 = client.post(
-        "/token", json={"user_id": user, "session_id": t1["session_id"]}
+        "/sessions", json={"user_id": user, "session_id": t1["session_id"]}
     ).json()
     assert t2["session_id"] == t1["session_id"]
     assert t2["room_name"] != t1["room_name"]
@@ -223,10 +223,10 @@ def test_resume_session_rotates_room_name_keeps_session_id():
 
 def test_resume_rejects_other_users_session():
     t1 = client.post(
-        "/token", json={"user_id": "owner", "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": "owner", "lesson_id": LESSON_ID}
     ).json()
     res = client.post(
-        "/token", json={"user_id": "intruder", "session_id": t1["session_id"]}
+        "/sessions", json={"user_id": "intruder", "session_id": t1["session_id"]}
     )
     assert res.status_code == 404
 
@@ -234,15 +234,15 @@ def test_resume_rejects_other_users_session():
 def test_resume_rejects_finished_session():
     user = "finished-resume-user"
     t1 = client.post(
-        "/token", json={"user_id": user, "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": user, "lesson_id": LESSON_ID}
     ).json()
-    client.post(
+    client.put(
         f"/sessions/{t1['session_id']}/state",
         json={"state_json": {"idx": 4, "phase": "done", "last_gaps": []}},
     )
 
     res = client.post(
-        "/token", json={"user_id": user, "session_id": t1["session_id"]}
+        "/sessions", json={"user_id": user, "session_id": t1["session_id"]}
     )
     assert res.status_code == 409
 
@@ -253,10 +253,10 @@ def test_resume_rejects_finished_session():
 def test_multiple_in_progress_sessions_allowed_per_user_lesson():
     user = "multi-attempt-user"
     t1 = client.post(
-        "/token", json={"user_id": user, "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": user, "lesson_id": LESSON_ID}
     ).json()
     t2 = client.post(
-        "/token", json={"user_id": user, "lesson_id": LESSON_ID}
+        "/sessions", json={"user_id": user, "lesson_id": LESSON_ID}
     ).json()
 
     # Two distinct sessions, both in-progress, both visible in Continue
@@ -270,8 +270,8 @@ def test_user_lesson_reused_across_attempts():
     """Two Starts on the same lesson share one UserLesson row, but have
     separate Session rows. Verified indirectly via /sessions list."""
     user = "shared-userlesson-user"
-    client.post("/token", json={"user_id": user, "lesson_id": LESSON_ID})
-    client.post("/token", json={"user_id": user, "lesson_id": LESSON_ID})
+    client.post("/sessions", json={"user_id": user, "lesson_id": LESSON_ID})
+    client.post("/sessions", json={"user_id": user, "lesson_id": LESSON_ID})
 
     body = client.get(f"/sessions?user_id={user}").json()
     # Both sessions are tagged with the same lesson_id, so they share a UserLesson

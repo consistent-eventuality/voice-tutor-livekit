@@ -11,7 +11,8 @@ Per-session orchestration:
        a. Cheat phrase → synthetic pass.
        b. Otherwise: gpt-4o-mini grader → {score, gaps}.
        c. state.transition(grade) — Python branch decides next phase.
-       d. POST /sessions/{id}/state with new state_json.
+       d. PUT /sessions/{id}/state with new state_json (idempotent
+          replacement; safe to retry).
        e. session.say(text) for the next phase's curated content.
 
 Per-transition state save lets the user disconnect mid-lesson (clean OR
@@ -98,10 +99,11 @@ class TutorAgent(Agent):
 
     async def _save_state(self) -> None:
         """Persist the current LessonState to the backend so a future
-        resume can pick up here. Called after every transition."""
+        resume can pick up here. Called after every transition.
+        Idempotent: PUT semantics — replays of the same state are no-ops."""
         try:
             async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=5.0) as http:
-                await http.post(
+                await http.put(
                     f"/sessions/{self._session_id}/state",
                     json={"state_json": self._state.to_dict()},
                 )
@@ -234,6 +236,14 @@ async def entrypoint(ctx: JobContext) -> None:
     # Pipelined STT + LLM + TTS. The LLM is required by the framework
     # but never invoked via generate_reply — all agent speech goes
     # through session.say().
+    #
+    # Silero VAD detects start/end of user speech in the audio stream
+    # and tells the framework "the user's turn just ended." Without it
+    # the framework wouldn't know when to commit a user turn, so
+    # on_user_turn_completed (where the grader runs) would never fire.
+    # Alternatives are Realtime's server-side turn detection (skips
+    # framework hooks — that's why we left it) or livekit-plugins-turn-
+    # detector (heavier ML model). Silero is small, CPU-only, and fast.
     session = AgentSession(
         vad=silero.VAD.load(),
         stt=lk_openai.STT(model="whisper-1"),

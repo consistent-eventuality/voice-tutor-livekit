@@ -37,26 +37,15 @@ def mint_access_token(
 
 def room_name_for_session(session_id: int) -> str:
     """Encode the Session.id into the LiveKit room name so the agent can
-    extract it on dispatch via `parse_session_id_from_room_name`.
+    extract it on dispatch (see `_parse_session_id_from_room` in
+    `agent/agent.py` — the parser lives there because it runs in the
+    agent process, which can't import from the backend).
 
     Format: 'tutor-{session_id}-{short_uuid}'. Each call yields a fresh
     room name (uuid suffix), letting us rotate rooms on resume without
     storing room_name in the DB.
     """
     return f"tutor-{session_id}-{uuid.uuid4().hex[:8]}"
-
-
-def parse_session_id_from_room_name(room_name: str) -> int | None:
-    """Extract the Session.id from a room name minted via
-    `room_name_for_session`. Returns None on malformed input.
-    """
-    parts = room_name.split("-")
-    if len(parts) >= 3 and parts[0] == "tutor":
-        try:
-            return int(parts[1])
-        except ValueError:
-            return None
-    return None
 
 
 def new_participant_identity() -> str:

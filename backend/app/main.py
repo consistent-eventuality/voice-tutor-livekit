@@ -129,17 +129,17 @@ async def list_in_progress_sessions(
     return out
 
 
-# ---------- /token ----------
+# ---------- POST /sessions (create or resume) ----------
 
 
-class TokenRequest(BaseModel):
+class SessionRequest(BaseModel):
     user_id: str
     lesson_id: str | None = None
     session_id: int | None = None
     participant_name: str | None = None
 
 
-class TokenResponse(BaseModel):
+class SessionResponse(BaseModel):
     token: str
     url: str
     room_name: str
@@ -149,10 +149,10 @@ class TokenResponse(BaseModel):
     resuming: bool
 
 
-@app.post("/token", response_model=TokenResponse)
-async def create_token(
-    body: TokenRequest, db: ORMSession = Depends(get_db)
-) -> TokenResponse:
+@app.post("/sessions", response_model=SessionResponse)
+async def create_or_resume_session(
+    body: SessionRequest, db: ORMSession = Depends(get_db)
+) -> SessionResponse:
     """Mint a LiveKit access token.
 
     - If `session_id` is provided: resume that specific session. Mint a
@@ -238,7 +238,7 @@ async def create_token(
         logger.error("Token mint failed: %s", e)
         raise HTTPException(status_code=503, detail=str(e))
 
-    return TokenResponse(
+    return SessionResponse(
         token=token,
         url=LIVEKIT_URL,
         room_name=room,
@@ -277,7 +277,7 @@ async def get_session(
     )
 
 
-# ---------- /sessions/{id}/state (agent posts on every transition) ----------
+# ---------- /sessions/{id}/state (agent PUTs on every transition) ----------
 
 
 class StateUpdateRequest(BaseModel):
@@ -288,7 +288,7 @@ class StateUpdateResponse(BaseModel):
     status: str
 
 
-@app.post("/sessions/{session_id}/state", response_model=StateUpdateResponse)
+@app.put("/sessions/{session_id}/state", response_model=StateUpdateResponse)
 async def update_session_state(
     session_id: int,
     body: StateUpdateRequest,
