@@ -352,34 +352,30 @@ Resume on the Continue tile and a new worker hydrates from the DB.
 
 ## Project layout
 
+Build/config plumbing (`Dockerfile`s, `requirements.txt`, `tsconfig*.json`, etc.) omitted.
+
 ```
 .
-├── backend/                          # FastAPI + SQLite
-│   ├── app/
-│   │   ├── main.py                   # /health, /lessons, /sessions/*
-│   │   ├── db.py                     # Session model (single table)
-│   │   ├── lesson_catalog.py         # title/blurb/concept_names mirror
-│   │   └── livekit_token.py          # mint + room_name <→ session_id helpers
-│   └── tests/                        # pytest, in-memory SQLite per run
-├── agent/                            # livekit-agents worker
-│   ├── agent.py                      # state-machine orchestration
-│   ├── lesson.py                     # Lesson dataclass + LESSONS registry
-│   ├── prompts.py                    # teach_text / reteach_text / closing_text
-│   ├── grader.py                     # gpt-4o-mini grader
-│   └── state_machine.py              # LessonState; serialization
-├── frontend/                         # Vite + React + TS + Tailwind v4
+├── backend/                       # FastAPI + SQLite — token mint, session persistence
+│   └── app/
+│       ├── main.py                # /health, /lessons, /sessions/*
+│       ├── db.py                  # Session model (single table)
+│       ├── lesson_catalog.py      # backend-side mirror of agent/lesson.py metadata
+│       └── livekit_token.py       # mint + room_name <→ session_id helpers
+├── agent/                         # livekit-agents worker — the loop runs here
+│   ├── agent.py                   # orchestration; on_user_turn_completed hook
+│   ├── state_machine.py           # LessonState — pure Python, deterministic
+│   ├── grader.py                  # gpt-4o-mini grader (the only LLM call)
+│   ├── lesson.py                  # Lesson + LESSONS registry (curated content)
+│   └── prompts.py                 # teach_text / reteach_text / closing_text
+├── frontend/                      # Vite + React + Tailwind v4
 │   └── src/
-│       ├── App.tsx
-│       ├── api.ts
-│       ├── hooks/useUserId.ts
-│       ├── utils/time.ts
+│       ├── App.tsx                # view router (home ↔ session)
+│       ├── api.ts                 # /sessions, /lessons fetchers + types
 │       └── components/
-│           ├── Home.tsx              # Continue + Available sections
-│           └── VoicePanel.tsx        # in-session voice UI
-├── data/                             # SQLite file (gitignored)
-├── docker-compose.yml
-├── .env.example
-└── README.md
+│           ├── Home.tsx           # Continue + Available sections
+│           └── VoicePanel.tsx     # in-session voice UI
+└── docker-compose.yml
 ```
 
 ## Running pieces individually
