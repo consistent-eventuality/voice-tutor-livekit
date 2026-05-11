@@ -1,12 +1,4 @@
-# voice-tutor-livekit
-
-A real-time voice AI tutor built on [LiveKit](https://livekit.io). The product
-isn't the LLM doing the teaching — it's the **loop machinery** that turns
-"voice AI" into a structured tutor: teach → grade → adapt. Intelligence
-is concentrated where it earns its keep (a single LLM call for grading); the
-rest is deterministic Python.
-
-## Why this exists
+## Product Overview
 
 For the voice tutor I had two goals:
 
@@ -26,20 +18,19 @@ surfaces gaps that silent reading doesn't. The framework extends to any
 subject that fits voice AI well; the loop machinery is the part that
 generalizes.
 
-## What it is
+## Curriculum, Lesson and Concept
 
 ```
-Curriculum  =  DAG of Lessons (with prereq edges)              ← parked
-Lesson      =  ordered list of Concepts + metadata             ← built (2 lessons)
-Concept     =  the loop primitive (TEACH → GRADE → RETEACH?)   ← THE ENGINE
+Curriculum  =  DAG of Lessons (Out of scopt)
+Lesson      =  ordered list of Concepts + metadata (built 2 lessons)
+Concept     =  the loop primitive (TEACH → GRADE → RETEACH?)   
 ```
 
-The Concept primitive is what makes this not a wrapper around
-ChatGPT-with-voice:
+The Concept primitive is what makes this not a wrapper around ChatGPT-with-voice:
 
 | Concern | Realized as |
 |---|---|
-| **Speak this turn** | `AgentSession.say(static_text)` — bypasses the LLM. Content comes verbatim from `agent/lesson.py`. |
+| **Voice Tutoring** | `AgentSession.say(static_text)` — bypasses the LLM. Content comes verbatim from `agent/lesson.py`. |
 | **Transcribe the user's answer** | OpenAI Whisper (streaming STT plugin) |
 | **Grade the answer** | A separate `gpt-4o-mini` text completion with `response_format` JSON-schema enforcement. The **only** LLM call in the runtime path. |
 | **Decide next action** | A Python `if` in `state_machine.py:transition()`. Pass → advance. Fail → reteach. |
@@ -50,9 +41,13 @@ The loop, at a glance:
 TEACH  →  USER PRACTICE  →  EVALUATE  →  RETEACH OR PROGRESS
 ```
 
-Each LLM call has prose for one task only. The if-statement lives in Python
-where if-statements work. The agent's voice never goes through an LLM — all
-spoken content is curated.
+ The agent's voice never goes through an LLM — all spoken content is curated.
+
+### Tip: skip the grader
+
+Say **`"abracadabra"`** instead of an answer to skip the grader and force-pass
+the current concept. Walks a fresh lesson start-to-finish in ~30 seconds.
+Configurable via `VOICE_TUTOR_CHEAT` env if you want a different phrase.
 
 ## Quickstart
 
@@ -105,11 +100,28 @@ INFO:voice-tutor-agent:Grade: concept=HTTP_BASICS score=7 gaps=[] phase_before=t
 INFO:voice-tutor-agent:Phase after transition: teach (idx=1)
 ```
 
-### Tip: skip the grader
+## Out of scope
 
-Say **`"abracadabra"`** instead of an answer to skip the grader and force-pass
-the current concept. Walks a fresh lesson start-to-finish in ~30 seconds.
-Configurable via `VOICE_TUTOR_CHEAT` env if you want a different phrase.
+Parked across product and engineering — each is a clear next step:
+
+**Product / content**
+
+- **Polished frontend.** The frontend was AI-generated end-to-end so engineering effort could concentrate on the loop machinery.
+- **Clarify phase.** A voice tutor should let the user ask questions. A `clarify` phase + a separate `Clarifier` LLM call slots into the state machine alongside `teach` / `reteach`.
+- **Speech-skill detection and coaching.** Pronunciation, accent, words per minute, speaking style. Not in scope here; possible against the same STT stream.
+- **Curriculum content quality and breadth.** Two fixture lessons. Production wants many more, expert-written, editorially reviewed.
+
+**Engineering**
+
+- **Prompt tuning.** A real ship would A/B against held-out transcripts to tune wording, the grading threshold, and reteach behavior.
+- **Tailored reteach via LLM.** Reteach currently re-reads the same teach text with a brief lead-in. The future version uses a `Reteacher` LLM call that takes `(concept, gaps_from_grader)` and produces a 2–3 sentence explanation tailored to the user's specific misunderstanding. `state.last_gaps` is already populated; this is a one-function add.
+- **Persisting grades.** `Grade` flows through Python in-session but isn't written to DB. A per-(session, concept) grades table unlocks analytics and cross-session adaptation.
+- **Cross-session learning progression.** Home doesn't show mastery, streaks, or prior-misconception flags. Persisting graded misconceptions across sessions unlocks "you struggled with X last time, let's start there."
+- **Upper bound on reteach attempts.** A user can stay on a concept indefinitely. Production would have escalation rules ("third miss → flag for review") and a user-facing skip option.
+- **Curriculum as a DAG.** Current `LESSONS` is a flat dict. The natural next shape is a Curriculum — a DAG of Lessons with prereq edges. The state machine would walk the DAG: branch into sub-lessons on weak answers, skip ahead when prereqs are mastered, surface "you're ready for X next" affordances.
+- **Voice-chat performance tuning.** Turn-detection thresholds, VAD sensitivity, TTS streaming latency — all left at framework defaults.
+- **Auth.** Anonymous UUID in localStorage. JWT middleware on `/sessions` is the drop-in.
+- **Exhaustive testing.** The happy path and the main negative path (user fails the grader) are covered; edgecase not exhaustively tested.
 
 ---
 
@@ -235,9 +247,7 @@ explicitly chooses which to resume from the Continue tiles.
 
 `user_id` and `lesson_id` are denormalized onto each session row. There's no
 separate `user_lessons` parent table — there was nothing per-(user, lesson) to
-attach to it, so it was premature abstraction. If cross-session features land
-later (mastery, preferences, total time-on-lesson), promoting back to a
-two-table model is a half-hour refactor.
+attach to it. Add if cross-session features land later (mastery, preferences, total time-on-lesson).
 
 The agent's session lookup uses the **room name** as the join key —
 `POST /sessions` mints rooms named `tutor-{session_id}-{uuid}`, the agent
@@ -345,29 +355,6 @@ Resume on the Continue tile and a new worker hydrates from the DB.
 ├── .env.example
 └── README.md
 ```
-
-## Out of scope (deliberately)
-
-Parked across product and engineering — each is a clear next step:
-
-**Product / content**
-
-- **Polished frontend.** The frontend was AI-generated end-to-end so engineering effort could concentrate on the loop machinery.
-- **Clarify phase.** A voice tutor should let the user ask questions. A `clarify` phase + a separate `Clarifier` LLM call slots into the state machine alongside `teach` / `reteach`.
-- **Speech-skill detection and coaching.** Pronunciation, accent, words per minute, speaking style. Not in scope here; possible against the same STT stream.
-- **Curriculum content quality and breadth.** Two fixture lessons. Production wants many more, expert-written, editorially reviewed.
-
-**Engineering**
-
-- **Prompt tuning.** Every prompt (teach, reteach, grader) is first-cut. A real ship would A/B against held-out transcripts to tune wording, the grading threshold, and reteach behavior.
-- **Tailored reteach via LLM.** Reteach currently re-reads the same teach text with a brief lead-in. The future version uses a `Reteacher` LLM call that takes `(concept, gaps_from_grader)` and produces a 2–3 sentence explanation tailored to the user's specific misunderstanding. `state.last_gaps` is already populated; this is a one-function add.
-- **Persisting grades.** `Grade` flows through Python in-session but isn't written to DB. A per-(session, concept) grades table unlocks analytics and cross-session adaptation.
-- **Cross-session learning progression.** Home doesn't show mastery, streaks, or prior-misconception flags. Persisting graded misconceptions across sessions unlocks "you struggled with X last time, let's start there."
-- **Upper bound on reteach attempts.** A user can stay on a concept indefinitely. Production would have escalation rules ("third miss → flag for review") and a user-facing skip option.
-- **Curriculum as a DAG.** Current `LESSONS` is a flat dict. The natural next shape is a Curriculum — a DAG of Lessons with prereq edges. The state machine would walk the DAG: branch into sub-lessons on weak answers, skip ahead when prereqs are mastered, surface "you're ready for X next" affordances.
-- **Voice-chat performance tuning.** Turn-detection thresholds, VAD sensitivity, TTS streaming latency, barge-in handling — all left at framework defaults.
-- **Auth.** Anonymous UUID in localStorage. JWT middleware on `/sessions` is the drop-in.
-- **Exhaustive testing.** The happy path and the main negative path (user fails the grader) are covered; beyond that, manual.
 
 ## Running pieces individually
 
